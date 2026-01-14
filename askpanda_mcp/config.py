@@ -20,3 +20,21 @@ class Config:
 
     # Where queuedata.json or other site metadata might live
     QUEUE_DATA_PATH: str = os.getenv("ASKPANDA_QUEUE_DATA_PATH", "data/queuedata.json")
+
+    # LLM profiles: JSON string or path later; start with env for simplicity.
+    LLM_DEFAULT_PROFILE: str = os.getenv("ASKPANDA_LLM_DEFAULT_PROFILE", "default")
+    LLM_FAST_PROFILE: str = os.getenv("ASKPANDA_LLM_FAST_PROFILE", "fast")
+    LLM_REASONING_PROFILE: str = os.getenv("ASKPANDA_LLM_REASONING_PROFILE", "reasoning")
+
+    # Model strings (minimal starting point)
+    LLM_DEFAULT_PROVIDER: str = os.getenv("ASKPANDA_LLM_DEFAULT_PROVIDER", "openai")
+    LLM_DEFAULT_MODEL: str = os.getenv("ASKPANDA_LLM_DEFAULT_MODEL", "gpt-4.1-mini")
+
+    LLM_FAST_PROVIDER: str = os.getenv("ASKPANDA_LLM_FAST_PROVIDER", "openai")
+    LLM_FAST_MODEL: str = os.getenv("ASKPANDA_LLM_FAST_MODEL", "gpt-4.1-mini")
+
+    LLM_REASONING_PROVIDER: str = os.getenv("ASKPANDA_LLM_REASONING_PROVIDER", "openai")
+    LLM_REASONING_MODEL: str = os.getenv("ASKPANDA_LLM_REASONING_MODEL", "gpt-4.1")
+
+    # Optional OpenAI-compatible endpoint (for Llama/Mistral via vLLM/Ollama/etc.)
+    OPENAI_COMPAT_BASE_URL: str = os.getenv("ASKPANDA_OPENAI_COMPAT_BASE_URL", "")
