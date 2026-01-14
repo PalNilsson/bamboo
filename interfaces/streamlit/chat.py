@@ -17,321 +17,497 @@
 # under the License.
 
 """
-AskPanDA Streamlit UI (MCP-first)
+AskPanDA Streamlit Chat UI (MCP-first)
 
-This UI talks directly to the AskPanDA MCP server (stdio transport) instead of
-invoking the old clients.selection CLI.
+This Streamlit app connects to an AskPanDA MCP server using either:
+  - STDIO transport (dev): spawns `python -m askpanda_mcp.server`
+  - Streamable HTTP transport (prod): connects to `http://host:port/mcp`
+
+Key Streamlit constraints handled here:
+  - No widget calls inside cached functions.
+  - The MCP client is wrapped in a synchronous interface for Streamlit.
+
+Expected companion module:
+  interfaces/shared/mcp_client.py
+
+It must expose:
+  - MCPServerConfig
+  - MCPClientSync  (sync wrapper with methods: list_tools, list_prompts, call_tool, close)
 
 Run:
   streamlit run interfaces/streamlit/chat.py
-
-Notes:
-- For dev convenience, this UI can spawn the MCP server process via stdio using:
-    <python> -m askpanda_mcp.server
-- For production / multi-client use, consider adding Streamable HTTP transport
-  to your MCP server and connecting via HTTP instead.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import sys
-import uuid
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import streamlit as st
 
-from interfaces.shared.mcp_client import MCPServerConfig, MCPStdioClient
+from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig
 
 
-# -------------------- MCP helpers -------------------- #
+# -----------------------------
+# Types
+# -----------------------------
+JSONDict = Dict[str, Any]
+JSONList = List[Any]
 
+
+@dataclass(frozen=True)
+class UIConfig:
+    """Configuration values gathered from Streamlit widgets.
+
+    Attributes:
+        transport: Connection transport ("stdio" or "http").
+        stdio_command: Python executable to run the MCP server in stdio mode.
+        stdio_args_json: JSON-encoded list of args for the stdio server command.
+        stdio_env_json: JSON-encoded dict of environment vars for stdio.
+        http_url: MCP streamable HTTP URL (e.g., http://localhost:8000/mcp).
+    """
+
+    transport: str
+    stdio_command: str
+    stdio_args_json: str
+    stdio_env_json: str
+    http_url: str
+
+
+# -----------------------------
+# Helpers (pure, no widgets)
+# -----------------------------
+def _safe_parse_json_list(value: str, fallback: Optional[List[str]] = None) -> List[str]:
+    """Parse a JSON list of strings, returning a fallback on error.
+
+    Args:
+        value: JSON string that should decode to a list.
+        fallback: Returned when parsing fails.
+
+    Returns:
+        A list of strings.
+    """
+    if fallback is None:
+        fallback = ["-m", "askpanda_mcp.server"]
+    try:
+        parsed = json.loads(value)
+        if not isinstance(parsed, list):
+            return fallback
+        out: List[str] = []
+        for item in parsed:
+            out.append(str(item))
+        return out
+    except Exception:
+        return fallback
+
+
+def _safe_parse_json_dict(value: str) -> Optional[Dict[str, str]]:
+    """Parse a JSON dict of string keys/values.
+
+    Args:
+        value: JSON string that should decode to a dict. Empty string => None.
+
+    Returns:
+        Dict[str, str] if valid, otherwise None.
+    """
+    if not value.strip():
+        return None
+    try:
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict):
+            return None
+        out: Dict[str, str] = {}
+        for k, v in parsed.items():
+            out[str(k)] = str(v)
+        return out
+    except Exception:
+        return None
+
+
+def _extract_text_from_content(content_items: Any) -> str:
+    """Extract human-readable text from MCP content items.
+
+    MCP tool calls commonly return a list of content objects/dicts like:
+      [{"type": "text", "text": "..."}]
+
+    Args:
+        content_items: Tool response.
+
+    Returns:
+        Concatenated text content.
+    """
+    if content_items is None:
+        return ""
+
+    # If response is an object with `.content`, try that.
+    if hasattr(content_items, "content"):
+        content_items = getattr(content_items, "content")
+
+    parts: List[str] = []
+
+    if isinstance(content_items, str):
+        return content_items
+
+    if isinstance(content_items, dict):
+        # Single dict response
+        if content_items.get("type") == "text":
+            return str(content_items.get("text", ""))
+        return json.dumps(content_items, indent=2)
+
+    if isinstance(content_items, list):
+        for item in content_items:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                else:
+                    parts.append(json.dumps(item, indent=2))
+                continue
+            # Unknown object: try attributes
+            if hasattr(item, "type") and getattr(item, "type") == "text" and hasattr(item, "text"):
+                parts.append(str(getattr(item, "text")))
+            else:
+                parts.append(str(item))
+        return "\n".join([p for p in parts if p.strip()])
+
+    # Fallback
+    try:
+        return json.dumps(content_items, indent=2)
+    except Exception:
+        return str(content_items)
+
+
+def _tool_names(tools_result: Any) -> List[str]:
+    """Extract tool names from `session.list_tools()` results.
+
+    Different MCP versions return different shapes:
+      - list of Tool objects
+      - dict-like tool definitions
+      - object with `.tools` list
+
+    Args:
+        tools_result: The return value of MCP list_tools.
+
+    Returns:
+        Sorted list of tool names.
+    """
+    # unwrap `.tools` if present
+    if hasattr(tools_result, "tools"):
+        tools_result = getattr(tools_result, "tools")
+
+    names: List[str] = []
+    if tools_result is None:
+        return names
+
+    if isinstance(tools_result, list):
+        for t in tools_result:
+            if isinstance(t, dict) and "name" in t:
+                names.append(str(t["name"]))
+            elif hasattr(t, "name"):
+                names.append(str(getattr(t, "name")))
+            else:
+                # last resort
+                names.append(str(t))
+    elif isinstance(tools_result, dict):
+        # sometimes tools are returned as {"tools": [...]}
+        inner = tools_result.get("tools")
+        if isinstance(inner, list):
+            return _tool_names(inner)
+    return sorted(set(names))
+
+
+def _prompt_names(prompts_result: Any) -> List[str]:
+    """Extract prompt names from `session.list_prompts()` results.
+
+    Args:
+        prompts_result: The return value of MCP list_prompts.
+
+    Returns:
+        Sorted list of prompt names.
+    """
+    if hasattr(prompts_result, "prompts"):
+        prompts_result = getattr(prompts_result, "prompts")
+
+    names: List[str] = []
+    if prompts_result is None:
+        return names
+
+    if isinstance(prompts_result, list):
+        for p in prompts_result:
+            if isinstance(p, dict) and "name" in p:
+                names.append(str(p["name"]))
+            elif hasattr(p, "name"):
+                names.append(str(getattr(p, "name")))
+            else:
+                names.append(str(p))
+    elif isinstance(prompts_result, dict):
+        inner = prompts_result.get("prompts")
+        if isinstance(inner, list):
+            return _prompt_names(inner)
+    return sorted(set(names))
+
+
+def _guess_auto_tool(question: str, available_tools: Sequence[str]) -> Tuple[str, JSONDict]:
+    """Pick a reasonable tool + arguments based on a question (light heuristic).
+
+    This avoids requiring a server-side orchestration tool while you're bootstrapping.
+
+    Args:
+        question: User question.
+        available_tools: Known tool names from the server.
+
+    Returns:
+        (tool_name, args)
+    """
+    q = question.lower().strip()
+
+    # Prefer a single orchestration tool if you add it later.
+    for candidate in ("askpanda_answer", "askpanda_chat", "askpanda_query"):
+        if candidate in available_tools:
+            return candidate, {"query": question}
+
+    if "log" in q or "traceback" in q or "error" in q or "failed" in q:
+        if "panda_log_analysis" in available_tools:
+            return "panda_log_analysis", {"log_text": question}
+
+    # crude task id extraction
+    if "task" in q or "jedi" in q:
+        if "panda_task_status" in available_tools:
+            return "panda_task_status", {"task_id": question}
+
+    if "queue" in q or "site" in q:
+        if "panda_queue_info" in available_tools:
+            return "panda_queue_info", {"site": question}
+
+    if "panda_doc_search" in available_tools:
+        return "panda_doc_search", {"query": question, "k": 5}
+
+    # fallback: health
+    if "askpanda_health" in available_tools:
+        return "askpanda_health", {}
+
+    # ultimate fallback: first available tool
+    if available_tools:
+        return available_tools[0], {}
+
+    return "askpanda_health", {}
+
+
+# -----------------------------
+# Cached MCP client factory (NO WIDGETS INSIDE)
+# -----------------------------
 @st.cache_resource
-def _get_mcp_client(command: str, args_json: str, env_json: str) -> MCPStdioClient:
+def _get_mcp_client(cfg: UIConfig) -> MCPClientSync:
+    """Create and cache an MCP client based on UIConfig.
+
+    IMPORTANT: No Streamlit widgets may be called here.
+
+    Args:
+        cfg: UIConfig values (pure data).
+
+    Returns:
+        Connected MCPClientSync instance.
     """
-    Cache a connected MCP client across Streamlit reruns.
+    args = _safe_parse_json_list(cfg.stdio_args_json)
+    env = _safe_parse_json_dict(cfg.stdio_env_json)
 
-    IMPORTANT: This keeps the stdio server process + session alive for the duration
-    of the Streamlit session, which is what we want for chat UX.
-    """
-    try:
-        args = json.loads(args_json)
-        if not isinstance(args, list):
-            raise ValueError("args must be a JSON list")
-    except Exception:
-        args = ["-m", "askpanda_mcp.server"]
-
-    try:
-        env = json.loads(env_json) if env_json.strip() else None
-        if env is not None and not isinstance(env, dict):
-            raise ValueError("env must be a JSON object")
-    except Exception:
-        env = None
-
-    cfg = MCPServerConfig(command=command, args=args, env=env)
-    client = MCPStdioClient(cfg)
-    client.connect()
-    return client
-
-
-def _tool_names(tools) -> set[str]:
-    names = set()
-    for t in tools or []:
-        n = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
-        if n:
-            names.add(n)
-    return names
-
-
-def _render_call_tool_result(result: Any) -> str:
-    """
-    Convert MCP CallToolResult into a markdown string, robustly across SDK versions.
-    """
-    # Typical: result.content is list of content items with .type/.text (or dicts).
-    content = getattr(result, "content", None)
-    if content is None and isinstance(result, dict):
-        content = result.get("content")
-
-    if not content:
-        # Some SDK variants return list directly
-        if isinstance(result, list):
-            content = result
-
-    if not content:
-        return str(result)
-
-    parts: list[str] = []
-    for item in content:
-        t = getattr(item, "type", None) or (item.get("type") if isinstance(item, dict) else None)
-        if t == "text":
-            txt = getattr(item, "text", None) or (item.get("text") if isinstance(item, dict) else "")
-            parts.append(txt)
-        elif t == "json":
-            obj = getattr(item, "json", None) or (item.get("json") if isinstance(item, dict) else None)
-            parts.append(f"```json\n{json.dumps(obj, indent=2, sort_keys=True)}\n```")
-        else:
-            # fallback
-            parts.append(f"```json\n{json.dumps(item if isinstance(item, dict) else item.__dict__, indent=2, default=str)}\n```")
-
-    return "\n\n".join([p for p in parts if p])
-
-
-def _extract_task_id(text: str) -> Optional[int]:
-    # Very loose heuristic: PanDA/JEDI task IDs are typically long integers.
-    m = re.search(r"\b(\d{6,})\b", text)
-    return int(m.group(1)) if m else None
-
-
-def _auto_answer(client: MCPStdioClient, question: str, session_id: str, model: str) -> str:
-    """
-    Minimal "auto" orchestration for early bootstrapping.
-
-    Preference order:
-      1) call askpanda_answer if server provides it (recommended server-side orchestration)
-      2) call askpanda_chat if provided
-      3) fallback: doc search (+ task status if a task id is detected)
-    """
-    tools = client.list_tools()
-    names = _tool_names(tools)
-
-    if "askpanda_answer" in names:
-        res = client.call_tool("askpanda_answer", {"question": question, "session_id": session_id, "model": model})
-        return _render_call_tool_result(res)
-
-    if "askpanda_chat" in names:
-        res = client.call_tool("askpanda_chat", {"message": question, "session_id": session_id, "model": model})
-        return _render_call_tool_result(res)
-
-    # fallback: use basic tools
-    chunks: list[str] = []
-    if "panda_doc_search" in names:
-        res = client.call_tool("panda_doc_search", {"query": question, "k": 5})
-        chunks.append("### Doc search\n" + _render_call_tool_result(res))
-
-    task_id = _extract_task_id(question)
-    if task_id and "panda_task_status" in names:
-        res = client.call_tool("panda_task_status", {"task_id": task_id})
-        chunks.append(f"### Task status ({task_id})\n" + _render_call_tool_result(res))
-
-    if not chunks:
-        return (
-            "I can reach the MCP server, but I don't see an orchestration tool like "
-            "`askpanda_answer` and I can't find fallback tools like `panda_doc_search`. "
-            "Try adding an `askpanda_answer` tool server-side, or enable the dummy tools."
+    if cfg.transport == "http":
+        server_cfg = MCPServerConfig(
+            transport="http",
+            http_url=cfg.http_url,
+        )
+    else:
+        server_cfg = MCPServerConfig(
+            transport="stdio",
+            stdio_command=cfg.stdio_command or sys.executable,
+            stdio_args=args,
+            stdio_env=env,
         )
 
-    return "\n\n".join(chunks)
+    return MCPClientSync(server_cfg)
 
 
-# ---------------- Chat state helpers ---------------- #
+# -----------------------------
+# Streamlit UI
+# -----------------------------
+def _sidebar_config() -> UIConfig:
+    """Render sidebar widgets and return selected config.
 
-def create_new_chat(title: str | None = None) -> Dict[str, Any]:
-    """Create a new chat object with its own session_id and greeting."""
-    chat_id = uuid.uuid4().hex
-    session_id = f"streamlit-{chat_id[:8]}"
-    return {
-        "id": chat_id,
-        "title": title or "New chat",
-        "session_id": session_id,
-        "messages": [
-            {
-                "role": "assistant",
-                "content": (
-                    "Hello! I'm AskPanDA (Streamlit). "
-                    "This UI talks to the AskPanDA MCP server and can call tools."
-                ),
-            }
-        ],
-        "last_error": None,
-    }
-
-
-def update_chat_title_from_prompt(chat: Dict[str, Any], prompt: str) -> None:
-    """Auto-set chat title from first user prompt."""
-    if chat.get("title") in ("New chat", None) and prompt.strip():
-        chat["title"] = prompt.strip()[:48] + ("…" if len(prompt.strip()) > 48 else "")
-
-
-# ---------------- Streamlit app ---------------- #
-
-st.set_page_config(page_title="AskPanDA (MCP)", page_icon="🐼", layout="wide")
-
-# Inject CSS for a centered main column and chat-like input styling
-st.markdown(
+    Returns:
+        UIConfig with values from widgets.
     """
-<style>
-/* ChatGPT-like centered main column */
-section[data-testid="stMain"] > div {
-    max-width: 900px;
-    margin: 0 auto;
-}
+    st.sidebar.header("AskPanDA MCP Connection")
 
-/* Input container spacing */
-div[data-testid="stChatInput"] {
-    padding-top: 12px;
-    padding-bottom: 24px;
-}
+    transport = st.sidebar.selectbox("Transport", ["stdio", "http"], index=0)
 
-/* Chat input wrapper */
-div[data-testid="stChatInput"] > div {
-    border-radius: 18px !important;
-    border: 1px solid rgba(0, 0, 0, 0.2);
-    background: #f2f2f2 !important;
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# Initialize chats on first run
-if "chats" not in st.session_state:
-    st.session_state.chats = [create_new_chat()]
-    st.session_state.current_chat_index = 0
-
-chats = st.session_state.chats
-current_chat = chats[st.session_state.current_chat_index]
-
-# ---------------- Sidebar ---------------- #
-with st.sidebar:
-    st.title("🐼 AskPanDA (MCP)")
-    st.caption("Streamlit interface calling MCP tools")
-
-    if st.button("🆕 New chat", use_container_width=True):
-        st.session_state.chats.append(create_new_chat())
-        st.session_state.current_chat_index = len(st.session_state.chats) - 1
-        st.rerun()
-
-    st.markdown("---")
-    st.subheader("Connection")
-
-    # Default to current interpreter for convenience
-    default_command = sys.executable or "python3"
-    command = st.text_input("Server command", value=default_command)
-
-    args_json = st.text_input(
-        "Server args (JSON list)",
-        value='["-m", "askpanda_mcp.server"]',
+    stdio_command = sys.executable
+    stdio_args_json = st.sidebar.text_area(
+        "STDIO args (JSON list)",
+        value=json.dumps(["-m", "askpanda_mcp.server"]),
+        height=70,
         help='Example: ["-m", "askpanda_mcp.server"]',
     )
 
-    env_json = st.text_area(
-        "Extra env (JSON object, optional)",
+    stdio_env_json = st.sidebar.text_area(
+        "STDIO env (JSON object, optional)",
         value="",
-        height=80,
-        help='Example: {"ASKPANDA_ENABLE_REAL_PANDA":"0"}',
+        height=70,
+        help='Example: {"PYTHONPATH": "/path/to/repo"}',
     )
 
-    # Allow clearing cache to force reconnect
-    if st.button("🔌 Reconnect", use_container_width=True):
+    http_url = "http://localhost:8000/mcp"
+    if transport == "http":
+        http_url = st.sidebar.text_input("HTTP MCP URL", value=http_url)
+
+    if st.sidebar.button("Reset MCP connection"):
+        # Clear cached resources and rerun.
         st.cache_resource.clear()
         st.rerun()
 
-    st.markdown("---")
-    st.subheader("Chat settings")
-    model = st.text_input("Model (passed to server tool if supported)", value="gemini")
-    current_chat["session_id"] = st.text_input(
-        "Session ID",
-        value=current_chat["session_id"],
-        help="Passed to tools that support session-based context/memory.",
-        key=f"session_id_{current_chat['id']}",
+    return UIConfig(
+        transport=transport,
+        stdio_command=stdio_command,
+        stdio_args_json=stdio_args_json,
+        stdio_env_json=stdio_env_json,
+        http_url=http_url,
     )
 
-    mode = st.radio("Mode", options=["Auto", "Manual tool call"], index=0)
 
-# Connect (cached)
-try:
-    mcp = _get_mcp_client(command, args_json, env_json)
-    tools = mcp.list_tools()
-    prompts = mcp.list_prompts()
-except Exception as e:
-    st.error(f"Failed to connect to MCP server: {e}")
-    st.stop()
+def _render_connection_status(mcp: MCPClientSync) -> Tuple[List[str], List[str]]:
+    """Fetch and display tools/prompts.
 
-# --------------- Top bar: capabilities --------------- #
-with st.expander("Server capabilities", expanded=False):
-    st.write("Tools:", sorted(list(_tool_names(tools))))
-    st.write("Prompts:", [getattr(p, "name", None) or p.get("name") for p in (prompts or [])])
+    Args:
+        mcp: Connected MCP client.
 
-# ---------------- Render conversation ---------------- #
-for msg in current_chat["messages"]:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    Returns:
+        (tool_names, prompt_names)
+    """
+    with st.spinner("Fetching MCP capabilities..."):
+        tools_result = mcp.list_tools()
+        prompts_result = mcp.list_prompts()
 
-# ---------------- Input and tool execution ---------------- #
-prompt = st.chat_input("Ask PanDA…")
+    tool_names = _tool_names(tools_result)
+    prompt_names = _prompt_names(prompts_result)
 
-if prompt:
+    c1, c2 = st.columns(2)
+    with c1:
+        st.caption("Tools")
+        st.write(tool_names if tool_names else "No tools returned.")
+    with c2:
+        st.caption("Prompts")
+        st.write(prompt_names if prompt_names else "No prompts returned.")
+
+    return tool_names, prompt_names
+
+
+def _manual_tool_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
+    """Render a manual tool invocation panel.
+
+    Args:
+        mcp: MCP client.
+        tool_names: Available tool names.
+    """
+    st.subheader("Manual tool call")
+
+    if not tool_names:
+        st.info("No tools available to call.")
+        return
+
+    selected = st.selectbox("Tool", list(tool_names))
+    args_text = st.text_area("Arguments (JSON object)", value="{}", height=120)
+
+    if st.button("Call tool"):
+        try:
+            args = json.loads(args_text) if args_text.strip() else {}
+            if not isinstance(args, dict):
+                raise ValueError("Arguments must be a JSON object.")
+        except Exception as e:
+            st.error(f"Invalid JSON arguments: {e}")
+            return
+
+        try:
+            result = mcp.call_tool(selected, args)
+            st.code(_extract_text_from_content(result), language="text")
+        except Exception as e:
+            st.error(f"Tool call failed: {e}")
+
+
+def _chat_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
+    """Render a simple chat interface backed by tool calls.
+
+    Args:
+        mcp: MCP client.
+        tool_names: Available tool names (used for auto routing).
+    """
+    st.subheader("Chat")
+
+    if "messages" not in st.session_state:
+        st.session_state["messages"] = []  # type: ignore[assignment]
+
+    # Show chat history
+    for msg in st.session_state["messages"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    question = st.chat_input("Ask AskPanDA…")
+    if not question:
+        return
+
     # Add user message
-    current_chat["messages"].append({"role": "user", "content": prompt})
-    update_chat_title_from_prompt(current_chat, prompt)
+    st.session_state["messages"].append({"role": "user", "content": question})
 
-    # Assistant response
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    # Produce assistant answer by calling a tool
     with st.chat_message("assistant"):
         try:
-            if mode == "Manual tool call":
-                tool_name = st.selectbox("Tool", options=sorted(list(_tool_names(tools))))
-                args_text = st.text_area("Arguments (JSON)", value="{}", height=120)
-                args = json.loads(args_text) if args_text.strip() else {}
-                with st.spinner(f"Calling {tool_name}…"):
-                    res = mcp.call_tool(tool_name, args)
-                answer_md = _render_call_tool_result(res)
-            else:
-                with st.spinner("Thinking / calling tools…"):
-                    answer_md = _auto_answer(
-                        client=mcp,
-                        question=prompt.strip(),
-                        session_id=current_chat["session_id"],
-                        model=model.strip(),
-                    )
-
-            st.markdown(answer_md)
-            current_chat["messages"].append({"role": "assistant", "content": answer_md})
-            current_chat["last_error"] = None
+            tool, args = _guess_auto_tool(question, tool_names)
+            st.caption(f"Auto tool: `{tool}`")
+            result = mcp.call_tool(tool, args)
+            answer = _extract_text_from_content(result)
+            if not answer.strip():
+                answer = "(Tool returned no text content.)"
+            st.markdown(answer)
         except Exception as e:
-            err = f"❌ Error calling MCP tools: `{e}`"
-            st.markdown(err)
-            current_chat["messages"].append({"role": "assistant", "content": err})
-            current_chat["last_error"] = str(e)
+            answer = f"Tool call failed: {e}"
+            st.error(answer)
 
-    st.rerun()
+    st.session_state["messages"].append({"role": "assistant", "content": answer})
+
+
+def main() -> None:
+    """Main Streamlit entrypoint."""
+    st.set_page_config(page_title="AskPanDA (MCP)", layout="wide")
+    st.title("AskPanDA (MCP-first)")
+
+    cfg = _sidebar_config()
+
+    # Build (cached) MCP client – widgets are already done above
+    try:
+        mcp = _get_mcp_client(cfg)
+    except Exception as e:
+        st.error(f"Failed to create MCP client: {e}")
+        st.stop()
+
+    # Show tools/prompts
+    try:
+        tool_names, _prompt_names_list = _render_connection_status(mcp)
+    except Exception as e:
+        st.error(f"Failed to list tools/prompts: {e}")
+        st.stop()
+
+    # Tabs: Chat + Manual tool calls
+    tab_chat, tab_tools = st.tabs(["Chat", "Tools"])
+    with tab_chat:
+        _chat_panel(mcp, tool_names)
+    with tab_tools:
+        _manual_tool_panel(mcp, tool_names)
+
+
+if __name__ == "__main__":
+    main()
