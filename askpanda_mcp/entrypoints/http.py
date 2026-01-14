@@ -48,6 +48,49 @@ _lock = asyncio.Lock()
 _SESSION_HEADERS = (b"mcp-session-id", b"x-mcp-session-id")
 
 
+async def _shutdown() -> None:
+    """Shuts down per-session resources and shared clients.
+
+    This is invoked from the ASGI lifespan shutdown event to ensure the service
+    exits cleanly (important for Kubernetes SIGTERM handling). It:
+
+    - Cancels all background connect/run tasks.
+    - Clears per-session transport state.
+    - Closes any shared LLM client manager if present on the server instance.
+
+    The MCP StreamableHTTPServerTransport is held open by the background tasks
+    via its `connect()` context manager. Cancelling those tasks is the primary
+    mechanism to close transports gracefully.
+    """
+    # Cancel background tasks first (these own the transport.connect() context).
+    tasks = list(_tasks.values())
+    for task in tasks:
+        task.cancel()
+
+    # Await task completion to let connect() contexts exit.
+    for task in tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            # Best-effort shutdown: ignore unexpected task errors.
+            pass
+
+    async with _lock:
+        _tasks.clear()
+        _transports.clear()
+        _ready.clear()
+
+    # Best-effort close of a shared LLM manager, if the server exposes one.
+    llm_manager = getattr(server, "llm_manager", None)
+    if llm_manager is not None and hasattr(llm_manager, "close_all"):
+        try:
+            await llm_manager.close_all()  # type: ignore[func-returns-value]
+        except Exception:
+            pass
+
+
 def _get_session_id_from_scope(scope: Scope) -> Optional[str]:
     """Extract MCP session id from ASGI scope headers or query string.
 
@@ -184,8 +227,27 @@ async def app(scope: Scope, receive: Receive, send: Send) -> None:
         receive: ASGI receive callable.
         send: ASGI send callable.
     """
-    if scope.get("type") != "http":
-        # Only HTTP is supported here
+    scope_type = scope.get("type")
+
+    # Support ASGI lifespan events so the service can shutdown cleanly in
+    # process managers and Kubernetes.
+    if scope_type == "lifespan":
+        while True:
+            message = await receive()
+            msg_type = message.get("type")
+
+            if msg_type == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif msg_type == "lifespan.shutdown":
+                await _shutdown()
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+
+        # Unreachable, but keeps type checkers happy.
+        return
+
+    if scope_type != "http":
+        # Only HTTP and lifespan are supported here.
         return
 
     path = scope.get("path", "")
