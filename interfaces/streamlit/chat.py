@@ -399,7 +399,7 @@ def _sidebar_config() -> UIConfig:
     """
     st.sidebar.header("AskPanDA MCP Connection")
 
-    transport = st.sidebar.selectbox("Transport", ["stdio", "http"], index=0)
+    transport = st.sidebar.selectbox("Transport", ["http", "stdio"], index=0)
 
     stdio_command = sys.executable
     stdio_args_json = st.sidebar.text_area(

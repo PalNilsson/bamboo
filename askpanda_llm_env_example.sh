@@ -5,6 +5,14 @@
 # Remember to add this file to your .gitignore to avoid committing sensitive information.
 
 ########################################
+# PANDA RELATED
+########################################
+
+export PANDA_BASE_URL="https://bigpanda.cern.ch"
+export ASKPANDA_PANDA_RETRIES="2"
+export ASKPANDA_PANDA_BACKOFF_SECONDS="0.8"
+
+########################################
 # LLM PROFILE SELECTION
 ########################################
 
