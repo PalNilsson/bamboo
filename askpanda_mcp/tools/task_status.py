@@ -124,7 +124,20 @@ def _summarize_task(task_id: int, payload: Mapping[str, Any]) -> TaskSummary:
     monitor_url = f"{base}/task/{task_id}/"
 
     # Best-effort: field names can vary a bit across monitor versions
-    status = str(payload.get("taskstatus") or payload.get("status") or "unknown")
+    task_info = None
+    if isinstance(payload.get("task"), list) and payload.get("task"):
+        if isinstance(payload["task"][0], dict):
+            task_info = payload["task"][0]
+    elif isinstance(payload.get("task"), dict):
+        task_info = payload.get("task")
+
+    status = str(
+        (task_info or {}).get("taskstatus")
+        or (task_info or {}).get("status")
+        or payload.get("taskstatus")
+        or payload.get("status")
+        or "unknown"
+    )
 
     job_counts: Counter[str] = Counter()
     error_codes: deque[int] = deque(maxlen=50)
@@ -220,6 +233,8 @@ class PandaTaskStatusTool:
         task_id = arguments.get("task_id")
         question = arguments.get("question") or ""
         include_raw = bool(arguments.get("include_raw", False))
+        if os.getenv("ASKPANDA_PANDA_DEBUG", "") == "1":
+            include_raw = True
 
         if task_id is None:
             task_id = extract_task_id_from_text(str(question))
@@ -242,6 +257,31 @@ class PandaTaskStatusTool:
         summary = _summarize_task(int(task_id), payload)
 
         lines = []
+
+        # Detect "not found" cases. Some PanDA monitor endpoints may return 200 with
+        # an empty/near-empty payload rather than a 404.
+        # Heuristics: missing task info and missing jobs.
+        task_block = payload.get("task")
+        jobs_block = payload.get("jobs")
+        has_task = bool(task_block) and (isinstance(task_block, (list, dict)))
+        has_jobs = isinstance(jobs_block, list) and len(jobs_block) > 0
+        if not has_task and not has_jobs:
+            lines.append(
+                f"Task {task_id} was not found (no metadata returned). Monitor: {summary.monitor_url}"
+            )
+            # Always show top-level keys for debugging.
+            if isinstance(payload, dict):
+                lines.append(f"Payload keys: {sorted(payload.keys())}")
+            # Show raw payload snippet to aid debugging.
+            try:
+                import json as _json
+                raw = _json.dumps(payload, indent=2)
+                lines.append("\nRaw payload (snippet):\n")
+                lines.append(raw[:5000])
+            except Exception:
+                pass
+            return text_content("\n".join(lines))
+
         lines.append(f"Task {summary.task_id}")
         lines.append(f"Status: {summary.status}")
         lines.append(f"Monitor: {summary.monitor_url}")
@@ -269,6 +309,17 @@ class PandaTaskStatusTool:
                     d1 = d1[:400] + "..."
                 lines.append(f"- {d1}")
             lines.append("")
+        if not include_raw and summary.status == "unknown" and isinstance(payload, dict):
+            lines.append(f"Payload keys: {sorted(payload.keys())}")
+            # If task info exists, show its keys too.
+            ti = None
+            if isinstance(payload.get("task"), list) and payload.get("task") and isinstance(payload["task"][0], dict):
+                ti = payload["task"][0]
+            elif isinstance(payload.get("task"), dict):
+                ti = payload.get("task")
+            if isinstance(ti, dict):
+                lines.append(f"Task block keys: {sorted(ti.keys())}")
+
         if include_raw:
             import json
             lines.append("Raw payload:\n")

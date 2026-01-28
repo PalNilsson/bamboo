@@ -27,6 +27,7 @@ from askpanda_mcp.tools.task_status import panda_task_status_tool
 from askpanda_mcp.tools.log_analysis import panda_log_analysis_tool
 from askpanda_mcp.tools.pilot_monitor import panda_pilot_status_tool
 from askpanda_mcp.tools.llm_passthrough import askpanda_llm_answer_tool
+from askpanda_mcp.tools.askpanda_answer import askpanda_answer_tool
 from askpanda_mcp.prompts.templates import (
     get_askpanda_system_prompt,
     get_failure_triage_prompt,
@@ -35,6 +36,7 @@ from askpanda_mcp.prompts.templates import (
 TOOLS = {
     "askpanda_health": askpanda_health_tool,
     "askpanda_llm_answer": askpanda_llm_answer_tool,
+    "askpanda_answer": askpanda_answer_tool,
     "panda_doc_search": panda_doc_search_tool,
     "panda_queue_info": panda_queue_info_tool,
     "panda_task_status": panda_task_status_tool,
@@ -77,7 +79,7 @@ def create_server() -> Server:
     set_llm_manager(llm_manager)
 
     @app.list_tools()
-    async def list_tools():
+    async def list_tools() -> Any:
         defs = [tool.get_definition() for tool in TOOLS.values()]
 
         # If Tool is a real class/model, return Tool objects.
@@ -92,14 +94,14 @@ def create_server() -> Server:
         return defs
 
     @app.call_tool()
-    async def call_tool(name: str, arguments: Dict[str, Any]):
+    async def call_tool(name: str, arguments: Dict[str, Any]) -> Any:
         tool = TOOLS.get(name)
         if not tool:
             raise ValueError(f"Unknown tool: {name}")
         return await tool.call(arguments or {})
 
     @app.list_prompts()
-    async def list_prompts():
+    async def list_prompts() -> Any:
         return [
             {"name": "askpanda_system", "description": "Core system prompt"},
             {
@@ -116,7 +118,7 @@ def create_server() -> Server:
         ]
 
     @app.get_prompt()
-    async def get_prompt(name: str, arguments: Dict[str, Any]):
+    async def get_prompt(name: str, arguments: Dict[str, Any]) -> Any:
         if name == "askpanda_system":
             return await get_askpanda_system_prompt()
         if name == "failure_triage":

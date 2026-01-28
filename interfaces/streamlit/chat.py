@@ -526,17 +526,20 @@ def _chat_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
 
         with st.spinner("Thinking…"):
             try:
-                if st.session_state.get("bypass_routing", True):
-                    tool = "askpanda_llm_answer"
-                    result = mcp.call_tool(tool, {"messages": st.session_state["messages"]})
-                else:
-                    # Use the most recent user message as the routing hint.
-                    last_user = next(
-                        (m["content"] for m in reversed(st.session_state["messages"]) if m.get("role") == "user"),
-                        "",
-                    )
-                    tool, args = _guess_auto_tool(last_user, tool_names)
-                    result = mcp.call_tool(tool, args)
+                # Always route via the server-side orchestration tool.
+                tool = "askpanda_answer"
+                last_user = next(
+                    (m["content"] for m in reversed(st.session_state["messages"]) if m.get("role") == "user"),
+                    "",
+                )
+                result = mcp.call_tool(
+                    tool,
+                    {
+                        "question": last_user,
+                        "messages": st.session_state["messages"],
+                        "bypass_routing": st.session_state.get("bypass_routing", False),
+                    },
+                )
 
                 answer = _extract_text_from_content(result)
                 if not answer.strip():
