@@ -222,3 +222,120 @@ echo "$MISTRAL_API_KEY"
 ## License
 
 Internal / project-specific (update as appropriate).
+
+
+## For Developers
+
+This section documents development and quality-assurance workflows for contributors
+and maintainers of this repository.
+
+### Running unit tests
+
+Unit tests are written using `pytest` and live under the `tests/` directory.
+
+To run all tests:
+
+```bash
+pytest
+```
+
+To run a specific test file:
+
+```bash
+pytest tests/test_summarize.py
+```
+
+To run tests with more verbose output:
+
+```bash
+pytest -v
+```
+
+The tests do **not** make real LLM API calls; all provider interactions are mocked.
+
+---
+
+### Static analysis and code quality
+
+This project uses several static-analysis tools. They are complementary and serve
+different purposes:
+
+- **flake8** — style, formatting, and complexity checks
+- **pylint** — deeper code-quality and design checks
+- **mypy** — static type checking
+- **pydocstyle** — docstring style checks (Google-style)
+
+Typical commands:
+
+```bash
+flake8
+pylint your_module.py
+mypy .
+pydocstyle
+```
+
+Configuration for these tools is provided via:
+
+- `pyproject.toml`
+- `.flake8`
+- `.pylintrc`
+- `.pre-commit-config.yaml`
+
+---
+
+### Pre-commit hooks
+
+This repository uses **pre-commit** to run quality checks automatically before
+each commit.
+
+To install the hooks locally:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+To run all hooks manually on all files:
+
+```bash
+pre-commit run --all-files
+```
+
+---
+
+### Type-checking notes
+
+This repository is primarily script-oriented rather than a distributable Python
+package. To avoid issues with directory naming and package inference, `mypy`
+is configured to treat files as standalone scripts via `pyproject.toml`.
+
+Optional third-party SDKs (for example `mistralai` or `google-genai`) may lack
+complete type stubs; missing imports are intentionally ignored by `mypy`.
+
+---
+
+### Adding new modules or scripts
+
+When adding new code:
+
+- Prefer **pure functions** where possible (simpler testing)
+- Add unit tests for non-trivial logic
+- Use modern type hints (`list[str]`, `str | None`, etc.)
+- Add a module-level docstring explaining the script’s purpose
+- Keep CLI parsing isolated in a `main()` function
+
+---
+
+### Recommended local workflow
+
+A typical local workflow before committing changes:
+
+```bash
+pytest
+flake8
+pylint your_module.py
+mypy .
+pydocstyle
+pre-commit run
+```
+
