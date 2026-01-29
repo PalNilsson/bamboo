@@ -219,11 +219,6 @@ echo "$MISTRAL_API_KEY"
 
 ---
 
-## License
-
-Internal / project-specific (update as appropriate).
-
-
 ## For Developers
 
 This section documents development and quality-assurance workflows for contributors
@@ -339,3 +334,8 @@ pydocstyle
 pre-commit run
 ```
 
+---
+
+## License
+
+Internal / project-specific (update as appropriate).
