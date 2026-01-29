@@ -14,14 +14,15 @@ The server startup code should call the setters exactly once.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from askpanda_mcp.llm.manager import LLMClientManager
 from askpanda_mcp.llm.selector import LLMSelector
 
-
-_llm_manager: Optional[LLMClientManager] = None
-_llm_selector: Optional[LLMSelector] = None
+# Module-level globals are an explicit pattern here (process-wide singletons).
+# pylint: disable=global-statement
+_llm_manager: LLMClientManager | None = None
+_llm_selector: LLMSelector | None = None
 
 
 def set_llm_manager(manager: LLMClientManager) -> None:

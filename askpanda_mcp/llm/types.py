@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Optional, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 Role = Literal["system", "user", "assistant", "tool"]
@@ -29,9 +29,9 @@ class ToolCall:
 @dataclass(frozen=True)
 class TokenUsage:
     """Normalized token usage (may be partially filled depending on provider)."""
-    input_tokens: Optional[int] = None
-    output_tokens: Optional[int] = None
-    total_tokens: Optional[int] = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ class LLMResponse:
     """Normalized model response."""
     text: str
     tool_calls: tuple[ToolCall, ...] = ()
-    usage: Optional[TokenUsage] = None
+    usage: TokenUsage | None = None
     raw: Any = None
 
 
@@ -48,13 +48,13 @@ class ModelSpec:
     """Concrete model configuration."""
     provider: str                 # "openai" | "anthropic" | "gemini" | "openai_compat"
     model: str                    # e.g. "gpt-4.1-mini"
-    base_url: Optional[str] = None
-    api_key_env: Optional[str] = None
-    extra: dict[str, Any] = None  # provider-specific knobs (optional)
+    base_url: str | None = None
+    api_key_env: str | None = None
+    extra: dict[str, Any] | None = None  # provider-specific knobs (optional)
 
 
 @dataclass(frozen=True)
 class GenerateParams:
     """Generation parameters."""
     temperature: float = 0.2
-    max_tokens: Optional[int] = None
+    max_tokens: int | None = None

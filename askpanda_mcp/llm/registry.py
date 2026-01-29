@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
 
 from askpanda_mcp.llm.types import ModelSpec
 
@@ -15,7 +14,7 @@ class ModelRegistry:
     Example:
         profiles["fast"] -> ModelSpec(provider="anthropic", model="claude-...")
     """
-    profiles: Mapping[str, ModelSpec]
+    profiles: dict[str, ModelSpec]
 
     def get(self, profile: str) -> ModelSpec:
         """Gets a profile ModelSpec.

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Any
+import dataclasses
 
 from askpanda_mcp.llm.registry import ModelRegistry
 from askpanda_mcp.llm.types import ModelSpec
@@ -135,8 +136,9 @@ def build_model_registry_from_config(config: Any) -> ModelRegistry:
     # If using openai_compat, allow a global base URL to be supplied.
     compat_base_url = str(_get(config, "ASKPANDA_OPENAI_COMPAT_BASE_URL", "") or "").strip()
     if compat_base_url:
-        for spec in profiles.values():
+        for name, spec in list(profiles.items()):
             if spec.provider == "openai_compat" and not spec.base_url:
-                spec.base_url = compat_base_url
+                # ModelSpec is frozen; create a replaced copy with the base_url set.
+                profiles[name] = dataclasses.replace(spec, base_url=compat_base_url)
 
     return ModelRegistry(profiles=profiles)

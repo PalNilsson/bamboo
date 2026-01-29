@@ -7,7 +7,7 @@ initializes process-wide resources (LLM selection + client caching).
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, cast
 
 from mcp.server import Server
 from mcp.types import ListToolsResult, Tool
@@ -81,7 +81,7 @@ def create_server() -> Server:  # pylint: disable=too-complex
     set_llm_manager(llm_manager)
 
     @app.list_tools()
-    async def list_tools() -> list[Tool] | ListToolsResult | list[dict[str, Any]]:
+    async def list_tools() -> Any:
         """Return the set of registered tools.
 
         The MCP `Tool` representation may be a runtime model/class or a
@@ -99,7 +99,7 @@ def create_server() -> Server:  # pylint: disable=too-complex
 
         # Otherwise, try wrapping in ListToolsResult (often a model even if Tool is TypedDict).
         if inspect.isclass(ListToolsResult):
-            return ListToolsResult(tools=defs)
+            return ListToolsResult(tools=cast(list[Tool], defs))
 
         # Last resort: plain dicts
         return defs
@@ -124,7 +124,7 @@ def create_server() -> Server:  # pylint: disable=too-complex
         return await tool.call(arguments or {})
 
     @app.list_prompts()
-    async def list_prompts() -> list[dict[str, Any]]:
+    async def list_prompts() -> Any:
         """List available prompts and their metadata.
 
         Returns:
@@ -147,7 +147,7 @@ def create_server() -> Server:  # pylint: disable=too-complex
         ]
 
     @app.get_prompt()
-    async def get_prompt(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def get_prompt(name: str, arguments: dict[str, str] | None) -> Any:
         """Return the requested prompt payload.
 
         Args:
@@ -163,7 +163,7 @@ def create_server() -> Server:  # pylint: disable=too-complex
         if name == "askpanda_system":
             return await get_askpanda_system_prompt()
         if name == "failure_triage":
-            return await get_failure_triage_prompt(arguments.get("log_text", ""))
+            return await get_failure_triage_prompt((arguments or {}).get("log_text", ""))
         raise ValueError(f"Unknown prompt: {name}")
 
     return app

@@ -8,14 +8,14 @@ and to close all clients cleanly on shutdown (ASGI lifespan).
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, Tuple
+from typing import Any
 
 from askpanda_mcp.llm.base import LLMClient
 from askpanda_mcp.llm.factory import build_client
 from askpanda_mcp.llm.types import ModelSpec
 
 
-def _spec_key(spec: ModelSpec) -> Tuple[str, str, str, str]:
+def _spec_key(spec: ModelSpec) -> tuple[str, str, str, str]:
     """Creates a stable cache key for a ModelSpec.
 
     Args:
@@ -39,7 +39,7 @@ class LLMClientManager:
     """
 
     def __init__(self) -> None:
-        self._clients: Dict[Tuple[str, str, str, str], LLMClient] = {}
+        self._clients: dict[tuple[str, str, str, str], LLMClient] = {}
         self._lock = asyncio.Lock()
 
     async def get_client(self, spec: ModelSpec) -> LLMClient:
@@ -75,6 +75,6 @@ class LLMClientManager:
         for client in clients:
             try:
                 await client.close()
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught - best-effort close
                 # Best-effort close: don't fail shutdown due to provider cleanup.
                 pass

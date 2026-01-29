@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Dict, Type
-
 from askpanda_mcp.llm.base import LLMClient
 from askpanda_mcp.llm.exceptions import LLMConfigError
 from askpanda_mcp.llm.types import ModelSpec
@@ -14,8 +12,7 @@ from askpanda_mcp.llm.providers.openai_client import OpenAILLMClient
 from askpanda_mcp.llm.providers.mistral_client import MistralLLMClient
 from askpanda_mcp.llm.providers.openai_compat_client import OpenAICompatLLMClient
 
-
-_PROVIDER_MAP: Dict[str, Type[LLMClient]] = {
+_PROVIDER_MAP: dict[str, type[LLMClient]] = {
     "openai": OpenAILLMClient,
     "anthropic": AnthropicLLMClient,
     "gemini": GeminiLLMClient,

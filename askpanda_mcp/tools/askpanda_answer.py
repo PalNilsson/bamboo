@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from typing import Any
 from collections.abc import Sequence
+from askpanda_mcp.llm.types import Message
 
 from askpanda_mcp.tools.base import text_content, coerce_messages
 from askpanda_mcp.tools.llm_passthrough import askpanda_llm_answer_tool
@@ -46,7 +47,7 @@ def _extract_task_id(text: str) -> int | None:
         return None
 
 
-def _coerce_messages(raw: Sequence[Any]) -> list[dict[str, str]]:
+def _coerce_messages(raw: Sequence[Any]) -> list[Message]:
     """Wrapper that delegates to shared coerce_messages helper."""
     return coerce_messages(raw)
 
@@ -111,6 +112,8 @@ class AskPandaAnswerTool:
             },
         }
 
+    # The orchestration logic is intentionally compact; complexity is accepted here.
+    # pylint: disable=too-complex
     async def call(self, arguments: dict[str, Any]) -> list[dict[str, Any]]:
         """Execute routing and delegation to the appropriate tool.
 
@@ -142,9 +145,11 @@ class AskPandaAnswerTool:
         if not question and messages:
             # Best-effort: use last user message as the routing hint.
             for msg in reversed(messages):
-                if msg.get("role") == "user" and msg.get("content"):
-                    question = msg["content"].strip()
-                    break
+                if msg.get("role") == "user":
+                    content_val = msg.get("content")
+                    if content_val:
+                        question = str(content_val).strip()
+                        break
 
         tool_used: str
         delegated: list[dict[str, Any]]
@@ -172,6 +177,8 @@ class AskPandaAnswerTool:
         try:
             if delegated and isinstance(delegated[0], dict):
                 body = str(delegated[0].get("text", ""))
+            elif delegated and isinstance(delegated[0], dict):
+                body = str(delegated[0].get("content", ""))
         except (IndexError, TypeError, KeyError):
             body = str(delegated)
 

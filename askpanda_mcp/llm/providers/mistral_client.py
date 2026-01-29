@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Optional, Sequence
+from typing import Any
+from collections.abc import Sequence
 
 from askpanda_mcp.llm.base import LLMClient
 from askpanda_mcp.llm.exceptions import LLMConfigError, LLMProviderError, LLMTimeoutError
@@ -21,7 +22,7 @@ class MistralLLMClient(LLMClient):
 
     def __init__(self, model_spec) -> None:
         super().__init__(model_spec)
-        self._client: Optional[Any] = None  # mistralai.Mistral (kept Any to avoid import at module import time)
+        self._client: Any | None = None  # mistralai.Mistral (kept Any to avoid import at module import time)
         self._lock = asyncio.Lock()
 
     async def close(self) -> None:
@@ -41,23 +42,21 @@ class MistralLLMClient(LLMClient):
         if self._client is not None:
             return self._client
 
-        api_key = (
-            os.getenv(self.model_spec.api_key_env)  # if you ever set api_key_env in ModelSpec
-            if getattr(self.model_spec, "api_key_env", None)
-            else os.getenv("MISTRAL_API_KEY")
-        )
+        env_name = getattr(self.model_spec, "api_key_env", None) or "MISTRAL_API_KEY"
+        api_key = os.getenv(env_name)
         if not api_key:
             raise LLMConfigError("MISTRAL_API_KEY is not set in the environment.")
 
         async with self._lock:
             if self._client is None:
                 # Import lazily so installing mistralai is only required if this provider is used.
+                # pylint: disable=import-outside-toplevel, unnecessary-dunder-call
                 from mistralai import Mistral  # type: ignore
 
                 self._client = Mistral(api_key=api_key)
 
-                # The SDK supports async context manager usage in your original code:
-                # await self._mistral_client.__aenter__()
+                # The SDK supports async context manager usage; enter the async context
+                # to initialize the client instance (we keep the instance for reuse).
                 await self._client.__aenter__()
 
         return self._client
@@ -73,8 +72,9 @@ class MistralLLMClient(LLMClient):
             if role == "tool":
                 # Minimal safe mapping: tool output becomes assistant-visible content.
                 role = "assistant"
-                if m.get("name"):
-                    content = f"[tool:{m['name']}]\n{content}"
+                name_val = m.get("name")
+                if name_val:
+                    content = f"[tool:{name_val}]\n{content}"
 
             if role not in ("system", "user", "assistant"):
                 role = "user"
@@ -105,8 +105,7 @@ class MistralLLMClient(LLMClient):
         async with _MISTRAL_CONCURRENCY:
             tries = int(os.getenv("ASKPANDA_MISTRAL_RETRIES", "3"))
             backoff = float(os.getenv("ASKPANDA_MISTRAL_BACKOFF_SECONDS", "1.0"))
-            last_err: Optional[Exception] = None
-
+            last_err: Exception | None = None
             for _ in range(tries):
                 try:
                     client = await self._get_client()
@@ -151,7 +150,8 @@ class MistralLLMClient(LLMClient):
 
                 except asyncio.TimeoutError as exc:
                     raise LLMTimeoutError(str(exc)) from exc
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001  pylint: disable=broad-exception-caught
+                    # Provider-level errors: capture and retry with backoff.
                     last_err = exc
                     await asyncio.sleep(backoff)
                     backoff *= 2

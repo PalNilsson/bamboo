@@ -11,7 +11,7 @@ Use-cases:
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from askpanda_mcp.prompts.templates import get_askpanda_system_prompt
 from askpanda_mcp.tools.base import text_content, coerce_messages
@@ -125,7 +125,7 @@ class LLMPassthroughTool:
         messages_arg = arguments.get("messages")
         messages: list[Message] = [system_message]
         if isinstance(messages_arg, list) and messages_arg:
-            messages.extend(coerce_messages(messages_arg))
+            messages.extend(cast(list[Message], coerce_messages(messages_arg)))
         else:
             question = str(arguments.get("question", "")).strip()
             if not question:

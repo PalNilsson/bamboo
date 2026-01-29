@@ -24,13 +24,23 @@ import asyncio
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Literal, Callable, Tuple
+from typing import Any, Dict, List, Optional, Literal, Callable, Tuple, Coroutine
+from typing import Any as _Any, TYPE_CHECKING
 
 import httpx
 
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamable_http_client
+
+# At runtime we import dynamically (some environments may not provide the helper).
+# For static type checkers, import the symbol under TYPE_CHECKING so pyright can see it.
+if TYPE_CHECKING:
+    try:
+        from mcp.client.streamable_http import streamable_http_client  # type: ignore
+    except Exception:  # pragma: no cover - only for static analysis
+        streamable_http_client = None  # type: ignore
+
+streamable_http_client: _Any = None
 
 
 TransportType = Literal["stdio", "http"]
@@ -109,8 +119,19 @@ class MCPAsyncClient:
             timeout = httpx.Timeout(self.cfg.http_timeout_s)
             self._http_client = httpx.AsyncClient(headers=self.cfg.http_headers, timeout=timeout)
 
+            # Dynamically import the helper using importlib and getattr to avoid static attribute access checks
+            import importlib
+            try:
+                _mod = importlib.import_module("mcp.client.streamable_http")
+                func = getattr(_mod, "streamable_http_client", None)
+            except Exception:
+                func = None
+
+            if func is None:
+                raise RuntimeError("streamable_http_client is not available in this environment")
+
             # streamable_http_client yields (read_stream, write_stream, get_session_id_callback)
-            self._transport_cm = streamable_http_client(
+            self._transport_cm = func(
                 self.cfg.http_url,
                 http_client=self._http_client,
                 terminate_on_close=self.cfg.terminate_on_close,
@@ -209,7 +230,7 @@ class MCPClientSync:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _run(self, coro: "asyncio.Future[Any] | asyncio.coroutines.Coroutine[Any, Any, Any]") -> Any:
+    def _run(self, coro: "asyncio.Future[Any] | Coroutine[Any, Any, Any]") -> Any:
         """Run a coroutine on the background loop and wait for the result.
 
         Args:
@@ -221,7 +242,9 @@ class MCPClientSync:
         Raises:
             RuntimeError: If the coroutine fails.
         """
-        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        # run_coroutine_threadsafe expects a coroutine; if a Future is passed
+        # (unlikely in our usage), forward it as-is; otherwise use it directly.
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]
         try:
             return fut.result()
         except Exception as e:

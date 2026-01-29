@@ -7,8 +7,10 @@ The `MCPTool` protocol describes the minimal shape a tool implementation must
 expose so it can be registered with the MCP server in this project.
 """
 from __future__ import annotations
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from collections.abc import Sequence
+
+from askpanda_mcp.llm.types import Message
 
 MCPContent = dict[str, Any]
 
@@ -29,13 +31,13 @@ class MCPTool(Protocol):
         raise NotImplementedError
 
 
-def coerce_messages(raw: Sequence[Any]) -> list[dict[str, str]]:
+def coerce_messages(raw: Sequence[Any]) -> list[Message]:
     """Coerce raw message objects into a list of {role, content} dicts.
 
     This helper is shared by multiple tools to normalize incoming message
     representations into the simple ``{{'role': str, 'content': str}}`` shape.
     """
-    out: list[dict[str, str]] = []
+    out: list[Message] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -43,7 +45,7 @@ def coerce_messages(raw: Sequence[Any]) -> list[dict[str, str]]:
         content = str(item.get("content", ""))
         if not content:
             continue
-        out.append({"role": role, "content": content})
+        out.append(cast(Message, {"role": role, "content": content}))
     return out
 
 

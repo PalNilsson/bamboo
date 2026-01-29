@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 from askpanda_mcp.llm.base import LLMClient
 from askpanda_mcp.llm.exceptions import LLMProviderError
@@ -15,7 +15,7 @@ class OpenAILLMClient(LLMClient):
     Note: Keep vendor imports inside methods to avoid hard dependency if not used.
     """
 
-    async def generate(self, messages: Sequence[Message], params: GenerateParams) -> LLMResponse:
+    async def generate(self, _messages: Sequence[Message], _params: GenerateParams) -> LLMResponse:
         try:
             # TODO: import openai SDK lazily and call API here
             # Normalize response into LLMResponse.
