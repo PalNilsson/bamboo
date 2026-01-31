@@ -1,0 +1,37 @@
+sequenceDiagram
+    autonumber
+    actor User
+    participant UI as Interface (Streamlit/CLI/Web)
+    participant MCP as MCP Server (HTTP)
+    participant LDR as Loader (entry points)
+    participant EXT as Argument Extractor
+    participant TOOL as Tool (atlas.task_status)
+    participant BP as BigPanDA (external)
+    participant LLM as LLM (summarizer)
+
+    User->>UI: "What happened to task 123456?"
+    UI->>MCP: POST /mcp/tools/call {query, namespace?}
+
+    MCP->>EXT: extract args from query
+    EXT-->>MCP: {task_id: 123456, query: ...}
+
+    MCP->>LDR: find_tool_by_name("task_status", "atlas")
+    LDR-->>MCP: ResolvedTool(obj, entry_point)
+
+    MCP->>TOOL: validate args against tool.get_definition().inputSchema
+    MCP->>TOOL: await tool.call({task_id, query})
+
+    TOOL->>BP: GET https://bigpanda.../task/123456/?json&jobs=1
+    BP-->>TOOL: JSON payload (or error/HTML)
+
+    TOOL-->>MCP: {text, evidence{status, monitor_url, payload...}}
+
+    alt LLM summarization enabled
+        MCP->>LLM: prompt(question + evidence + rules)
+        LLM-->>MCP: answer_text (human summary)
+        MCP-->>UI: {answer: answer_text, evidence, tool}
+    else LLM disabled
+        MCP-->>UI: {answer: tool.text, evidence, tool}
+    end
+
+    UI-->>User: Render answer + monitor link (+ evidence/debug)
