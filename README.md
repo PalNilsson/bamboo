@@ -12,7 +12,7 @@ The only tool that is fully working at this time is the ATLAS PanDA task status 
 ```bash
 pip install -e ./core
 pip install -e ./packages/askpanda_atlas
-python3 -m bamboo tools call atlas.task_status --arguments '{"task_id":123456}'
+python3 -m bamboo tools call atlas.task_status --arguments '{"task_id":123456}' (broken example, to be fixed)
 ```
 
 I will add a separate examples README when more tools are available.
