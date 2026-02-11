@@ -32,6 +32,7 @@ from typing import Any, cast
 from mcp.server import Server
 from mcp.types import ListToolsResult, Tool
 
+from bamboo.auth import TokenAuth
 from bamboo.config import Config
 
 # Phase 0: multi-LLM wiring
@@ -76,6 +77,10 @@ def create_server() -> Server:  # pylint: disable=too-complex
     singletons can access it.
     """
     app: Server = Server(Config.SERVER_NAME)
+
+    # ---- Auth: token allowlist (used by HTTP transports; stdio ignores headers) ----
+    auth = TokenAuth.from_env()
+    setattr(app, "auth", auth)
 
     # ---- Phase 0: initialize multi-LLM selection + per-process client cache ----
     # Support both Config being a class of constants or a dataclass-like type.
