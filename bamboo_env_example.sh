@@ -4,9 +4,13 @@
 # Copy this file, remove `_example`, and fill in the API keys as needed.
 # Remember to add this file to your .gitignore to avoid committing sensitive information.
 
-export PYTHONPATH=$PWD
+########################################
+# PANDA RELATED
+########################################
 
-export ASKPANDA_PANDA_DEBUG=1
+export PANDA_BASE_URL="https://bigpanda.cern.ch"
+export ASKPANDA_PANDA_RETRIES="2"
+export ASKPANDA_PANDA_BACKOFF_SECONDS="0.8"
 
 ########################################
 # LLM PROFILE SELECTION
@@ -43,7 +47,7 @@ export LLM_REASONING_MODEL="mistral-large-latest"
 ########################################
 
 # Required when using provider="mistral"
-export MISTRAL_API_KEY="4qfvU6punYwnhbxc3ME5ucd8S8KzJapB"
+export MISTRAL_API_KEY=""
 
 # Optional concurrency / retry tuning
 export ASKPANDA_MISTRAL_CONCURRENCY="4"
