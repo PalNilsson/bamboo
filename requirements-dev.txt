@@ -2,3 +2,4 @@ flake8
 pylint
 pydocstyle
 pyright
+circular-import-detector==1.0.18
