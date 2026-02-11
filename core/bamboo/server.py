@@ -42,6 +42,8 @@ async def main() -> None:
     ``create_server()`` and serving it over the stdio transport returned by
     ``stdio_server()``.
     """
+    # Note: stdio transport has no HTTP headers, so TokenAuth is only used by
+    # HTTP-based transports. create_server() still initializes app.auth
     app: Server = create_server()
     async with stdio_server() as (read_stream, write_stream):
         await app.run(
