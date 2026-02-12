@@ -8,7 +8,6 @@ and to close all clients cleanly on shutdown (ASGI lifespan).
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from bamboo.llm.base import LLMClient
 from bamboo.llm.factory import build_client
@@ -16,7 +15,7 @@ from bamboo.llm.types import ModelSpec
 
 
 def _spec_key(spec: ModelSpec) -> tuple[str, str, str, str]:
-    """Creates a stable cache key for a ModelSpec.
+    """Create a stable cache key for a ModelSpec.
 
     Args:
         spec: Model specification.
@@ -39,11 +38,12 @@ class LLMClientManager:
     """
 
     def __init__(self) -> None:
+        """Initialize the manager with an empty client cache."""
         self._clients: dict[tuple[str, str, str, str], LLMClient] = {}
         self._lock = asyncio.Lock()
 
     async def get_client(self, spec: ModelSpec) -> LLMClient:
-        """Returns a cached LLMClient for the given ModelSpec.
+        """Return a cached LLMClient for the given ModelSpec.
 
         If a client for this spec does not exist yet, it is created via the
         provider factory.
@@ -63,7 +63,7 @@ class LLMClientManager:
             return client
 
     async def close_all(self) -> None:
-        """Closes and clears all cached clients.
+        """Close and clear all cached clients.
 
         This should be called during application shutdown (e.g. ASGI lifespan
         shutdown) to ensure underlying HTTP resources are released cleanly.

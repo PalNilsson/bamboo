@@ -1,7 +1,7 @@
-"""
-bamboo/tools/task_status_impl.py  (v3)
+"""ATLAS PanDA task status tool implementation.
 
-ATLAS PanDA task status tool implementation (canonical, async) extracted from legacy code.
+Canonical async implementation extracted from legacy code for fetching PanDA
+task metadata from BigPanDA and returning structured evidence for LLM summarization.
 
 Key features:
 - Robust handling of non-JSON responses (HTML, empty, redirects, 404).
@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -30,7 +30,14 @@ logger = logging.getLogger(__name__)
 
 
 def _default_base_url() -> str:
-    """Best-effort base URL discovery with safe fallback."""
+    """Get the best-effort base URL with safe fallback.
+
+    Attempts to import base URL from tools.https module, falling back to
+    the default CERN BigPanDA URL if import fails.
+
+    Returns:
+        Base URL for BigPanDA API.
+    """
     try:
         from tools.https import get_base_url  # type: ignore
         return get_base_url()
@@ -39,11 +46,18 @@ def _default_base_url() -> str:
 
 
 def _fetch_jsonish(url: str, timeout: int = 30) -> Tuple[int, str, str, Optional[dict]]:
-    """
-    Fetch a URL expected to return JSON, but handle HTML/empty bodies robustly.
+    """Fetch a URL expected to return JSON, handling non-JSON responses robustly.
+
+    Handles HTML, empty bodies, redirects, and HTTP errors gracefully without
+    raising exceptions, allowing callers to process structured error responses.
+
+    Args:
+        url: URL to fetch.
+        timeout: HTTP request timeout in seconds. Defaults to 30.
 
     Returns:
-      (status_code, content_type, text, json_dict_or_none)
+        Tuple of (status_code, content_type, response_text, json_dict_or_none).
+        json_dict_or_none is None if response is not JSON or on HTTP errors.
     """
     resp = requests.get(
         url,
@@ -72,6 +86,17 @@ def _fetch_jsonish(url: str, timeout: int = 30) -> Tuple[int, str, str, Optional
 
 
 def _job_counts_from_payload(payload: dict) -> Dict[str, int]:
+    """Extract and count job statuses from payload.
+
+    Searches for jobs list in payload and counts occurrences of each job status.
+    Handles multiple common key names (jobs, jobList, joblist).
+
+    Args:
+        payload: Payload dict potentially containing jobs list.
+
+    Returns:
+        Dictionary mapping job status strings to counts. Empty dict if no jobs found.
+    """
     jobs = None
     for key in ("jobs", "jobList", "joblist"):
         if isinstance(payload.get(key), list):
@@ -79,7 +104,7 @@ def _job_counts_from_payload(payload: dict) -> Dict[str, int]:
             break
     if not jobs:
         return {}
-    statuses = []
+    statuses: list[str] = []
     for j in jobs:
         if not isinstance(j, dict):
             continue
@@ -90,17 +115,32 @@ def _job_counts_from_payload(payload: dict) -> Dict[str, int]:
 
 
 def _datasets_summary(payload: dict) -> dict:
+    """Summarize dataset status and file counts from payload.
+
+    Processes datasets list to extract status counts, file statistics, and
+    identifies problematic datasets with failures.
+
+    Args:
+        payload: Payload dict potentially containing datasets list.
+
+    Returns:
+        Dictionary with summary stats including:
+        - dataset_count: Total number of datasets
+        - status_counts: Counter of dataset statuses
+        - nfiles*_total: Aggregated file counts by status
+        - worst_datasets: List of up to 5 datasets with failures, sorted by severity
+    """
     datasets = payload.get("datasets")
     if not isinstance(datasets, list):
         return {}
 
-    status_counts = Counter()
-    nfilesfailed_total = 0
-    nfilesfinished_total = 0
-    nfileswaiting_total = 0
-    nfilesmissing_total = 0
+    status_counts: Counter[str] = Counter()
+    nfilesfailed_total: int = 0
+    nfilesfinished_total: int = 0
+    nfileswaiting_total: int = 0
+    nfilesmissing_total: int = 0
 
-    worst = []  # keep a few problematic datasets
+    worst: list[dict] = []  # keep a few problematic datasets
     for ds in datasets:
         if not isinstance(ds, dict):
             continue
@@ -151,6 +191,12 @@ def _datasets_summary(payload: dict) -> dict:
 
 
 def get_definition() -> dict:
+    """Get the MCP tool definition for task status.
+
+    Returns:
+        Dictionary containing tool name, description, inputSchema with task_id
+        requirement, examples, and tags for tool registry.
+    """
     return {
         "name": "task_status",
         "description": "Fetch PanDA task metadata from BigPanDA and return structured evidence for summarization.",
@@ -171,13 +217,34 @@ def get_definition() -> dict:
 
 
 class _Tool:
-    def __init__(self):
-        self._def = get_definition()
+    """MCP tool for fetching PanDA task status and metadata from BigPanDA.
+
+    Provides robust async interface for retrieving task information with
+    structured evidence output optimized for LLM summarization.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the tool with its definition."""
+        self._def: dict = get_definition()
 
     def get_definition(self) -> dict:
+        """Get the MCP tool definition.
+
+        Returns:
+            Tool definition dictionary.
+        """
         return self._def
 
     async def call(self, arguments: dict) -> dict:
+        """Fetch task status and return structured evidence.
+
+        Args:
+            arguments: Tool input dict with required 'task_id' key and optional
+                'query', 'include_jobs', and 'timeout' keys.
+
+        Returns:
+            Dictionary with 'evidence' (structured metadata) and 'text' (summary) keys.
+        """
         if not isinstance(arguments, dict):
             return {"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}
 
@@ -186,27 +253,29 @@ class _Tool:
             return {"evidence": {"error": "missing task_id", "provided": arguments}}
 
         try:
-            task_id_int = int(task_id)
+            task_id_int: int = int(task_id)
         except Exception:
             return {"evidence": {"error": "task_id must be an integer", "provided": arguments}}
 
-        include_jobs = arguments.get("include_jobs")
-        if include_jobs is None:
-            include_jobs = True
+        include_jobs: bool = bool(arguments.get("include_jobs", True))
 
-        timeout = arguments.get("timeout") or 30
+        timeout: int = arguments.get("timeout") or 30
         try:
             timeout = int(timeout)
         except Exception:
             timeout = 30
 
-        base_url = _default_base_url().rstrip("/")
-        monitor_url = f"{base_url}/task/{task_id_int}/"
-        json_url = f"{monitor_url}?json"
+        base_url: str = _default_base_url().rstrip("/")
+        monitor_url: str = f"{base_url}/task/{task_id_int}/"
+        json_url: str = f"{monitor_url}?json"
         if include_jobs:
             json_url = f"{monitor_url}?json&jobs=1"
 
         try:
+            http_status: int
+            content_type: str
+            text: str
+            payload: Optional[dict]
             http_status, content_type, text, payload = await asyncio.to_thread(_fetch_jsonish, json_url, timeout)
         except Exception as e:
             return {
@@ -221,10 +290,10 @@ class _Tool:
 
         # Non-JSON or HTTP error
         if payload is None:
-            snippet = (text or "").strip().replace("\n", " ")
+            snippet: str = (text or "").strip().replace("\n", " ")
             if len(snippet) > 400:
                 snippet = snippet[:400] + "…"
-            evidence = {
+            evidence: dict = {
                 "task_id": task_id_int,
                 "monitor_url": monitor_url,
                 "fetched_url": json_url,
@@ -234,7 +303,7 @@ class _Tool:
             }
             if http_status == 404:
                 evidence["not_found"] = True
-                msg = f"Task {task_id_int} was not found in BigPanDA (HTTP 404)."
+                msg: str = f"Task {task_id_int} was not found in BigPanDA (HTTP 404)."
             elif http_status >= 400:
                 msg = f"BigPanDA returned HTTP {http_status} when fetching task {task_id_int}."
             else:
@@ -242,18 +311,18 @@ class _Tool:
             return {"evidence": evidence, "text": msg}
 
         # Extract common task fields
-        task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
-        status = (task.get("status") if isinstance(task, dict) else None) or payload.get("status")
-        superstatus = task.get("superstatus") if isinstance(task, dict) else None
-        taskname = task.get("taskname") if isinstance(task, dict) else None
-        username = task.get("username") if isinstance(task, dict) else None
-        creationdate = task.get("creationdate") if isinstance(task, dict) else None
-        starttime = task.get("starttime") if isinstance(task, dict) else None
-        endtime = task.get("endtime") if isinstance(task, dict) else None
-        dsinfo = task.get("dsinfo") if isinstance(task, dict) else None
+        task: dict = payload.get("task", {}) if isinstance(payload.get("task"), dict) else {}
+        status: Optional[str] = (task.get("status") if isinstance(task, dict) else None) or payload.get("status")
+        superstatus: Optional[str] = task.get("superstatus") if isinstance(task, dict) else None
+        taskname: Optional[str] = task.get("taskname") if isinstance(task, dict) else None
+        username: Optional[str] = task.get("username") if isinstance(task, dict) else None
+        creationdate: Optional[str] = task.get("creationdate") if isinstance(task, dict) else None
+        starttime: Optional[str] = task.get("starttime") if isinstance(task, dict) else None
+        endtime: Optional[str] = task.get("endtime") if isinstance(task, dict) else None
+        dsinfo: Optional[str] = task.get("dsinfo") if isinstance(task, dict) else None
 
-        datasets_summary = _datasets_summary(payload)
-        job_counts = _job_counts_from_payload(payload)
+        datasets_summary: dict = _datasets_summary(payload) or {}
+        job_counts: Dict[str, int] = _job_counts_from_payload(payload) or {}
 
         evidence = {
             "task_id": task_id_int,
@@ -275,7 +344,7 @@ class _Tool:
         }
 
         # concise text (optional)
-        summary = f"Task {task_id_int} status: {status}." if status else f"Task {task_id_int} metadata fetched."
+        summary: str = f"Task {task_id_int} status: {status}." if status else f"Task {task_id_int} metadata fetched."
         return {"evidence": evidence, "text": summary}
 
 

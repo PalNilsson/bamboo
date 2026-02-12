@@ -24,7 +24,7 @@ _MISSING: object = object()
 
 
 def _get(config: Any, name: str, default: Any = _MISSING) -> Any:
-    """Gets a configuration value, preferring environment variables.
+    """Get a configuration value, preferring environment variables.
 
     Args:
         config: Config object or module with attributes.
@@ -54,7 +54,7 @@ def _get(config: Any, name: str, default: Any = _MISSING) -> Any:
 
 
 def _parse_profiles_json(value: str) -> dict[str, ModelSpec]:
-    """Parses JSON mapping profile name -> ModelSpec-like dict.
+    """Parse JSON mapping profile name to ModelSpec-like dict.
 
     Expected JSON format:
         {
@@ -99,7 +99,7 @@ def _parse_profiles_json(value: str) -> dict[str, ModelSpec]:
 
 
 def build_model_registry_from_config(config: Any) -> ModelRegistry:
-    """Builds a ModelRegistry from application configuration.
+    """Build a ModelRegistry from application configuration.
 
     This supports two configuration modes:
 

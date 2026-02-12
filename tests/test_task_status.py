@@ -1,6 +1,5 @@
 import asyncio
 import json
-import pytest
 
 from askpanda_atlas import task_status as ts_mod
 

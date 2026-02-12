@@ -37,7 +37,8 @@ python -m bamboo tools list
 - [Developer guide](docs/developer.md)
 - [MCP server & LLM internals](docs/mcp.md)
 - [Writing plugins](docs/plugins.md)
-
+- [Authentication & Security](docs/security.md)
+-
 ## Plugins
 
 - **askpanda_atlas** — ATLAS / PanDA workflows

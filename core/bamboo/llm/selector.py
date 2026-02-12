@@ -22,11 +22,11 @@ class LLMSelector:
     reasoning_profile: str = "reasoning"
 
     def select(self, task: TaskType, _tenant: str | None = None) -> ModelSpec:
-        """Selects a ModelSpec for a task.
+        """Select a ModelSpec for a task.
 
         Args:
             task: High-level task category.
-            Optional tenant identifier (future: per-tenant overrides).
+            _tenant: Optional tenant identifier (future: per-tenant overrides).
 
         Returns:
             ModelSpec for the chosen profile.

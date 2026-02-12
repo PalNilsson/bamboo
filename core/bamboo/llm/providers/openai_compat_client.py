@@ -15,7 +15,19 @@ class OpenAICompatLLMClient(LLMClient):
     Use this for vLLM/Ollama/LM Studio/Together/Fireworks or any OpenAI-compatible endpoint.
     """
 
-    async def generate(self, _messages: Sequence[Message], _params: GenerateParams) -> LLMResponse:
+    async def generate(self, messages: Sequence[Message], params: GenerateParams) -> LLMResponse:
+        """Generate a response from an OpenAI-compatible provider.
+
+        Args:
+            messages: Ordered chat messages to send to the provider.
+            params: Generation parameters (temperature, max tokens, etc.).
+
+        Returns:
+            LLMResponse containing the generated text.
+
+        Raises:
+            LLMProviderError: If the provider call fails.
+        """
         try:
             return LLMResponse(text="[OpenAI-compatible not wired yet]")
         except Exception as exc:  # noqa: BLE001

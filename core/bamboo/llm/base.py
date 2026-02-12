@@ -18,15 +18,20 @@ class LLMClient(ABC):
     """
 
     def __init__(self, model_spec: ModelSpec) -> None:
+        """Initialize the client with a model spec.
+
+        Args:
+            model_spec: Model specification for this client.
+        """
         self._model_spec = model_spec
 
     async def close(self) -> None:
-        """Closes any underlying network resources."""
+        """Close any underlying network resources."""
         return
 
     @property
     def model_spec(self) -> ModelSpec:
-        """Returns the model spec used by this client."""
+        """Return the model spec used by this client."""
         return self._model_spec
 
     @abstractmethod
@@ -35,7 +40,7 @@ class LLMClient(ABC):
         messages: Sequence[Message],
         params: GenerateParams,
     ) -> LLMResponse:
-        """Generates a completion.
+        """Generate a completion.
 
         Args:
             messages: Conversation messages in normalized format.

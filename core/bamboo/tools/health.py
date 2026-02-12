@@ -24,7 +24,7 @@ class HealthTool:
             Dict[str, Any]: Tool definition compatible with MCP discovery.
         """
         return {
-            "name": "askpanda_health",
+            "name": "bamboo_health",
             "description": "Return server name/version and enabled integrations.",
             "inputSchema": {"type": "object", "properties": {}},
         }
@@ -45,7 +45,7 @@ class HealthTool:
         del arguments  # pragma: no cover - explicit ignore
 
         return text_content(
-            f"AskPanDA MCP Server OK\n"
+            f"Bamboo MCP Server OK\n"
             f"- name: {Config.SERVER_NAME}\n"
             f"- version: {Config.SERVER_VERSION}\n"
             f"- ENABLE_REAL_PANDA: {Config.ENABLE_REAL_PANDA}\n"
@@ -53,4 +53,4 @@ class HealthTool:
         )
 
 
-askpanda_health_tool = HealthTool()
+bamboo_health_tool = HealthTool()

@@ -8,10 +8,24 @@ from typing import Any
 
 
 def _text_msg(text: str) -> dict[str, Any]:
+    """Create a text message dict for MCP prompt messages.
+
+    Args:
+        text: The text content of the message.
+
+    Returns:
+        Dictionary with role 'assistant' and text content.
+    """
     return {"role": "assistant", "content": {"type": "text", "text": text}}
 
 
-async def get_askpanda_system_prompt() -> dict[str, Any]:
+async def get_bamboo_system_prompt() -> dict[str, Any]:
+    """Get the system prompt for AskPanDA assistant.
+
+    Returns:
+        Dictionary with 'messages' list containing the system prompt defining
+        AskPanDA's role and behavior for PanDA/ATLAS workflow operations.
+    """
     return {
         "messages": [
             _text_msg(
@@ -24,6 +38,17 @@ async def get_askpanda_system_prompt() -> dict[str, Any]:
 
 
 async def get_failure_triage_prompt(log_text: str) -> dict[str, Any]:
+    """Get a prompt template for analyzing failure logs.
+
+    Produces a structured analysis prompt for triaging workflow failures including
+    classification, root causes, mitigation steps, and metadata collection guidance.
+
+    Args:
+        log_text: The failure log text to be analyzed.
+
+    Returns:
+        Dictionary with 'messages' list containing the analysis prompt.
+    """
     return {
         "messages": [
             _text_msg(

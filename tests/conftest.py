@@ -37,7 +37,6 @@ from pathlib import Path
 
 def pytest_configure() -> None:
     """Configure sys.path for local-source test runs."""
-
     repo_root = Path(__file__).resolve().parents[1]
 
     core_dir = repo_root / "core"

@@ -14,8 +14,6 @@ The server startup code should call the setters exactly once.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from bamboo.llm.manager import LLMClientManager
 from bamboo.llm.selector import LLMSelector
 
@@ -26,7 +24,7 @@ _llm_selector: LLMSelector | None = None
 
 
 def set_llm_manager(manager: LLMClientManager) -> None:
-    """Sets the process-wide LLM client manager.
+    """Set the process-wide LLM client manager.
 
     Args:
         manager: LLM client manager instance.
@@ -36,7 +34,7 @@ def set_llm_manager(manager: LLMClientManager) -> None:
 
 
 def get_llm_manager() -> LLMClientManager:
-    """Returns the process-wide LLM client manager.
+    """Return the process-wide LLM client manager.
 
     Returns:
         The LLMClientManager.
@@ -50,7 +48,7 @@ def get_llm_manager() -> LLMClientManager:
 
 
 def set_llm_selector(selector: LLMSelector) -> None:
-    """Sets the process-wide LLM selector.
+    """Set the process-wide LLM selector.
 
     Args:
         selector: LLMSelector instance.
@@ -60,7 +58,7 @@ def set_llm_selector(selector: LLMSelector) -> None:
 
 
 def get_llm_selector() -> LLMSelector:
-    """Returns the process-wide LLM selector.
+    """Return the process-wide LLM selector.
 
     Returns:
         The LLMSelector.

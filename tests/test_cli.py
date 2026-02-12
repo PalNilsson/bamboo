@@ -1,5 +1,4 @@
 import json
-import pytest
 
 from bamboo import cli as bamboo_cli
 

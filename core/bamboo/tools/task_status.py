@@ -1,5 +1,4 @@
-"""
-task_status.py
+"""Task status tool wrapper for PanDA task monitoring.
 
 Improved canonical wrapper for bamboo.tools.task_status that ensures the
 exported tool object `panda_task_status_tool` exposes a robust get_definition()
@@ -46,8 +45,21 @@ if _real is None:
         _import_errors.append(("task_status", repr(e)))
         _real = None
 
-# Helper to find a callable in a module
-def _find_callable_in_module(mod) -> Optional[Any]:
+
+def _find_callable_in_module(mod: Any) -> Optional[Any]:
+    """Find a callable function in a module for task status.
+
+    Searches for a callable in this order:
+    - panda_task_status_tool.call
+    - module-level call()
+    - Common function names (panda_task_status, get_task_status, task_status, run, handle)
+
+    Args:
+        mod: Module object to search.
+
+    Returns:
+        Callable function, or None if not found.
+    """
     # If module defines a canonical tool object with .call, use that
     if hasattr(mod, "panda_task_status_tool") and hasattr(mod.panda_task_status_tool, "call"):
         return getattr(mod, "panda_task_status_tool").call  # may be async or sync
@@ -60,8 +72,16 @@ def _find_callable_in_module(mod) -> Optional[Any]:
             return getattr(mod, name)
     return None
 
-# Final fallback: provide a stub that returns an informative error
-async def _stub_call(arguments: dict) -> Any:
+
+async def _stub_call(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Return a stub error response when no implementation is found.
+
+    Args:
+        arguments: Tool input arguments provided by the caller.
+
+    Returns:
+        Dictionary containing error information and debugging details.
+    """
     return {
         "error": "no underlying task_status implementation found",
         "message": "Restore the original implementation as task_status_impl.py or ensure the module exports callable functions.",
@@ -69,16 +89,25 @@ async def _stub_call(arguments: dict) -> Any:
         "provided_arguments": arguments,
     }
 
-# Wrap a callable (sync or async) into an async function
-def _wrap_callable(fn):
+
+def _wrap_callable(fn: Any) -> Any:
+    """Wrap a sync or async callable into an async function.
+
+    Args:
+        fn: Function or coroutine function to wrap.
+
+    Returns:
+        Async wrapper function that accepts arguments dict.
+    """
     if inspect.iscoroutinefunction(fn):
-        async def _async_fn(args):
+        async def _async_fn(args: dict[str, Any]) -> Any:
             return await fn(args)
         return _async_fn
     else:
-        async def _async_fn(args):
+        async def _async_fn(args: dict[str, Any]) -> Any:
             return await asyncio.to_thread(fn, args)
         return _async_fn
+
 
 _detected_callable = None
 if _real is not None:
@@ -89,20 +118,28 @@ if _detected_callable is not None:
 else:
     _async_caller = _stub_call
 
+
 # Create the canonical tool object with a robust get_definition including inputSchema
 class _Tool:
-    def __init__(self):
+    """PanDA task status tool wrapper with MCP-compatible definition.
+
+    Wraps underlying task_status implementations and provides a robust tool
+    definition including inputSchema for UI/registry validation.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the tool with a definition from real or default implementation."""
         # attempt to reuse definition from real module if present
         if _real is not None and hasattr(_real, "get_definition"):
             try:
-                base_def = _real.get_definition() or {}
+                base_def: dict[str, Any] = _real.get_definition() or {}
             except Exception:
                 base_def = {}
         else:
             base_def = {}
 
         # Ensure required fields exist and include a sensible inputSchema
-        self._def = {
+        self._def: dict[str, Any] = {
             "name": base_def.get("name", "panda_task_status"),
             "description": base_def.get("description", "PanDA task status (wrapped)"),
             "inputSchema": base_def.get("inputSchema", {
@@ -128,17 +165,33 @@ class _Tool:
             except Exception:
                 pass
 
-    def get_definition(self):
+    def get_definition(self) -> dict[str, Any]:
+        """Get the MCP tool definition.
+
+        Returns:
+            Tool definition dict with name, description, inputSchema, and metadata.
+        """
         return self._def
 
-    async def call(self, arguments: dict) -> Any:
+    async def call(self, arguments: dict[str, Any]) -> Any:
+        """Execute the task status tool with provided arguments.
+
+        Attempts to delegate to the underlying implementation if available,
+        otherwise returns a stub error response.
+
+        Args:
+            arguments: Tool input dict with required 'task_id' key.
+
+        Returns:
+            Task status result from underlying implementation, or error dict if not found.
+        """
         # Prefer passing the arguments through to the underlying implementation if present.
         if _real is not None:
             # If the real module exposes an awaitable call, try to use it
             try:
                 # If real exposes panda_task_status_tool with .call
                 if hasattr(_real, "panda_task_status_tool") and hasattr(_real.panda_task_status_tool, "call"):
-                    fn = _real.panda_task_status_tool.call
+                    fn: Any = _real.panda_task_status_tool.call
                     if inspect.iscoroutinefunction(fn):
                         return await fn(arguments)
                     else:
@@ -165,8 +218,18 @@ class _Tool:
         # No real implementation found — return stub response
         return await _stub_call(arguments)
 
-panda_task_status_tool = _Tool()
 
 # For backwards-compatibility, also expose module-level async call
-async def call(arguments: dict) -> Any:
+async def call(arguments: dict[str, Any]) -> Any:
+    """Execute the task status tool at module level for backwards compatibility.
+
+    Args:
+        arguments: Tool input dict with required 'task_id' key.
+
+    Returns:
+        Task status result from the tool.
+    """
     return await panda_task_status_tool.call(arguments)
+
+
+panda_task_status_tool = _Tool()

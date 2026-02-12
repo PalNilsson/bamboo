@@ -20,13 +20,14 @@
 
 """Authentication helpers for Bamboo services.
 
-This module provides a small, dependency-free Bearer token allowlist suitable
-for internal services. Tokens are loaded at process start and verified against
-an in-memory mapping for fast checks.
+This module implements a small Bearer-token allowlist suitable for internal
+services. Tokens are loaded at process start from either:
 
-Typical usage:
-  auth = TokenAuth.from_env()
-  client_id = auth.verify_bearer_token(auth_header_value)
+  - A tokens file specified by environment variable BAMBOO_MCP_TOKENS_FILE
+  - An inline token list specified by environment variable BAMBOO_MCP_TOKENS
+
+The stdio entrypoint does not use HTTP headers and therefore cannot enforce
+Bearer tokens; the HTTP entrypoint should enforce them on inbound requests.
 """
 
 from __future__ import annotations
@@ -38,21 +39,21 @@ from pathlib import Path
 from typing import Dict, Mapping, Optional, Tuple
 
 
+class TokenAuthError(ValueError):
+    """Raised when authentication fails."""
+
+
 @dataclass(frozen=True)
 class TokenAuthConfig:
     """Configuration for TokenAuth.
 
     Attributes:
-        tokens_file_env: Environment variable containing a path to tokens file.
-        tokens_env: Environment variable containing inline tokens.
+        tokens_file_env: Environment variable name for tokens file path.
+        tokens_env: Environment variable name for inline token list.
     """
 
     tokens_file_env: str = "BAMBOO_MCP_TOKENS_FILE"
     tokens_env: str = "BAMBOO_MCP_TOKENS"
-
-
-class TokenAuthError(ValueError):
-    """Raised when authentication fails."""
 
 
 def _parse_tokens_line(line: str) -> Optional[Tuple[str, str]]:
@@ -62,14 +63,16 @@ def _parse_tokens_line(line: str) -> Optional[Tuple[str, str]]:
       - "client_id: token"
       - "client_id token"
 
+    Blank lines and comment lines starting with "#" are ignored.
+
     Args:
-        line: Input line.
+        line: The input line.
 
     Returns:
-        Tuple of (client_id, token) if parsed, otherwise None for blank/comment.
+        Tuple of (client_id, token), or None if the line is blank/comment.
 
     Raises:
-        ValueError: If the line is non-empty and not parseable.
+        ValueError: If the line is non-empty but not parseable.
     """
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
@@ -145,7 +148,7 @@ class TokenAuth:
     """Bearer token allowlist authentication.
 
     Attributes:
-        token_to_client: Mapping from token string to client_id.
+        token_to_client: Mapping from token -> client_id.
     """
 
     token_to_client: Mapping[str, str]
@@ -170,18 +173,14 @@ class TokenAuth:
         inline = os.environ.get(cfg.tokens_env, "").strip()
 
         if file_path:
-            mapping = _load_tokens_from_file(Path(file_path))
-            return cls(mapping)
-
+            return cls(_load_tokens_from_file(Path(file_path)))
         if inline:
-            mapping = _load_tokens_from_env_value(inline)
-            return cls(mapping)
-
+            return cls(_load_tokens_from_env_value(inline))
         return cls({})
 
     @property
     def enabled(self) -> bool:
-        """Return True if auth is enabled (at least one token configured)."""
+        """Check if any tokens are configured for authentication."""
         return bool(self.token_to_client)
 
     def verify_token(self, token: str) -> str:
@@ -196,8 +195,6 @@ class TokenAuth:
         Raises:
             TokenAuthError: If token is invalid.
         """
-        # Use constant-time compare across candidates to avoid timing leaks.
-        # This is conservative; in internal deployments it’s still a good habit.
         for allowed, client_id in self.token_to_client.items():
             if secrets.compare_digest(token, allowed):
                 return client_id
@@ -210,7 +207,7 @@ class TokenAuth:
             authorization_header: Value of the Authorization header.
 
         Returns:
-            client_id for the token.
+            client_id for the token. If auth is disabled, returns "auth-disabled".
 
         Raises:
             TokenAuthError: If the header is missing/malformed or token is invalid.

@@ -19,8 +19,7 @@
 # - Paul Nilsson, paul.nilsson@cern.ch, 2026
 
 #!/usr/bin/env python3
-"""
-Generate high-entropy Bearer tokens for Bamboo MCP deployments.
+"""Generate high-entropy Bearer tokens for Bamboo MCP deployments.
 
 This script generates cryptographically strong tokens intended for use as
 Authorization Bearer tokens (shared secrets) when calling Bamboo MCP endpoints.
@@ -39,7 +38,8 @@ Examples:
 
 Notes:
   - Token entropy is specified in bits (default: 256 bits).
-  - Internally the script generates ceil(bits/8) random bytes via secrets.token_urlsafe(nbytes).
+  - Internally the script generates ceil(bits/8) random bytes via
+    secrets.token_urlsafe(nbytes).
   - Treat tokens like passwords: do not commit them to git or log them.
 """
 
@@ -51,7 +51,7 @@ import math
 import secrets
 import sys
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -124,8 +124,6 @@ def parse_tokens_txt_line(line: str) -> Tuple[str, str]:
     Supported formats:
       - "client_id: token"
       - "client_id token"
-
-    Lines that are empty or comments are considered invalid for parsing.
 
     Args:
         line: The line to parse.
@@ -285,7 +283,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Main entry point.
+    """Execute the main entry point.
 
     Args:
         argv: Optional argv override (for testing). If None, uses sys.argv.
@@ -296,7 +294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
-    if args.bits < args.min_bits:
+    if int(args.bits) < int(args.min_bits):
         parser.error(
             f"Refusing to generate tokens with {args.bits} bits (<{args.min_bits}). "
             "Use --min-bits to override if you really want this."
@@ -310,14 +308,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     records = generate_tokens(clients, int(args.bits))
 
-    if args.check_unique:
+    if bool(args.check_unique):
         existing_tokens = load_existing_tokens_from_stdin()
         collisions = [r for r in records if r.token in existing_tokens]
         if collisions:
-            # Extremely unlikely, but keep behavior deterministic.
             parser.error("Token collision detected (extremely unlikely). Re-run generation.")
 
-    fmt: str = args.format
+    fmt: str = str(args.format)
     if fmt == "tokens.txt":
         sys.stdout.write(emit_tokens_txt(records))
     elif fmt == "env":

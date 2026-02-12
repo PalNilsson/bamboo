@@ -1,0 +1,12 @@
+{
+  "include": [
+    "core",
+    "packages",
+    "tests"
+  ],
+  "extraPaths": [
+    "core",
+    "packages/askpanda_atlas"
+  ]
+}
+

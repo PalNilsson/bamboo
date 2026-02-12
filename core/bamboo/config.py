@@ -11,7 +11,13 @@ from dataclasses import dataclass
 import tomllib
 from pathlib import Path
 
+
 def load_askpanda_config() -> dict:
+    """Load AskPanDA configuration from `pyproject.toml`.
+
+    Returns:
+        Dictionary of configuration values under `tool.askpanda`, or an empty dict if the file does not exist.
+    """
     pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
     if not pyproject.exists():
         return {}
@@ -19,9 +25,11 @@ def load_askpanda_config() -> dict:
         data = tomllib.load(f)
     return data.get("tool", {}).get("askpanda", {})
 
+
 _CONFIG = load_askpanda_config()
 
 DEFAULT_NAMESPACE = _CONFIG.get("default_namespace")
+
 
 @dataclass(frozen=True)
 class Config:  # pylint: disable=too-many-instance-attributes
@@ -45,6 +53,7 @@ class Config:  # pylint: disable=too-many-instance-attributes
         LLM_REASONING_MODEL (str): Reasoning model string.
         OPENAI_COMPAT_BASE_URL (str): Optional OpenAI-compatible endpoint URL.
     """
+
     SERVER_NAME: str = os.getenv("ASKPANDA_SERVER_NAME", "askpanda-mcp-server")
     SERVER_VERSION: str = os.getenv("ASKPANDA_SERVER_VERSION", "0.1.0")
 

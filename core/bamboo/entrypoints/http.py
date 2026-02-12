@@ -1,7 +1,27 @@
-"""
-AskPanDA MCP HTTP entrypoint (Streamable HTTP, ASGI).
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# Authors
+# - Paul Nilsson, paul.nilsson@cern.ch, 2026
 
-This module exposes AskPanDA's MCP server over HTTP using the MCP Python SDK's
+"""
+Bamboo MCP HTTP entrypoint (Streamable HTTP, ASGI).
+
+This module exposes Bamboo's MCP server over HTTP using the MCP Python SDK's
 StreamableHTTPServerTransport. The transport in this MCP build requires:
 
 - StreamableHTTPServerTransport(mcp_session_id=...)
@@ -23,10 +43,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Awaitable, Callable, MutableMapping
+from typing import Any, Awaitable, Callable, MutableMapping, Sequence
 from urllib.parse import parse_qs
 
 from mcp.server.streamable_http import StreamableHTTPServerTransport
+
+from bamboo.auth import TokenAuthError
 
 from bamboo.core import create_server
 
@@ -46,6 +68,9 @@ _lock = asyncio.Lock()
 
 # Header names clients may use for session id
 _SESSION_HEADERS = (b"mcp-session-id", b"x-mcp-session-id")
+
+# Authorization header (HTTP)
+_AUTH_HEADER = b"authorization"
 
 
 async def _shutdown() -> None:
@@ -117,6 +142,26 @@ def _get_session_id_from_scope(scope: Scope) -> str | None:
         if sid:
             return str(sid).strip()
 
+    return None
+
+
+def _get_header_from_scope(scope: Scope, header_name: bytes) -> str | None:
+    """Get a header value from the ASGI scope.
+
+    Args:
+        scope: ASGI scope.
+        header_name: Lowercase header name as bytes (e.g. b"authorization").
+
+    Returns:
+        Header value decoded as UTF-8, or None if not present/decodable.
+    """
+    headers: Sequence[tuple[bytes, bytes]] = scope.get("headers") or []
+    for k, v in headers:
+        if k.lower() == header_name:
+            try:
+                return v.decode("utf-8").strip()
+            except UnicodeDecodeError:  # pragma: no cover
+                return None
     return None
 
 
@@ -257,6 +302,19 @@ async def app(scope: Scope, receive: Receive, send: Send) -> None:  # pylint: di
     if path != "/mcp":
         await _send_plain_text(send, 404, "not found")
         return
+
+    # ---- Auth (Bearer tokens) ----
+    # Auth is enabled only when BAMBOO_MCP_TOKENS_FILE or BAMBOO_MCP_TOKENS is set.
+    auth = getattr(server, "auth", None)
+    if auth is not None and getattr(auth, "enabled", False):
+        auth_header = _get_header_from_scope(scope, _AUTH_HEADER)
+        try:
+            _ = auth.verify_bearer_token(auth_header)
+        except TokenAuthError as exc:
+            msg = str(exc)
+            status = 403 if "Invalid token" in msg else 401
+            await _send_plain_text(send, status, msg)
+            return
 
     session_id = _get_session_id_from_scope(scope)
     if not session_id:

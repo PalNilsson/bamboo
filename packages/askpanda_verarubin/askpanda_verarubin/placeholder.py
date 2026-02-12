@@ -1,1 +1,3 @@
-tool = lambda *a, **k: None
+"""AskPanDA Rubin package."""
+
+# Rubin AskPanDA plugin (placeholder)

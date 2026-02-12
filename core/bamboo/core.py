@@ -32,8 +32,9 @@ from typing import Any, cast
 from mcp.server import Server
 from mcp.types import ListToolsResult, Tool
 
-from bamboo.auth import TokenAuth
 from bamboo.config import Config
+
+from bamboo.auth import TokenAuth
 
 # Phase 0: multi-LLM wiring
 from bamboo.llm.config_loader import build_model_registry_from_config
@@ -41,24 +42,24 @@ from bamboo.llm.manager import LLMClientManager
 from bamboo.llm.selector import LLMSelector
 from bamboo.llm.runtime import set_llm_manager, set_llm_selector
 
-from bamboo.tools.health import askpanda_health_tool
+from bamboo.tools.health import bamboo_health_tool
 from bamboo.tools.doc_rag import panda_doc_search_tool
 from bamboo.tools.queue_info import panda_queue_info_tool
 from bamboo.tools.task_status import panda_task_status_tool
 from bamboo.tools.log_analysis import panda_log_analysis_tool
 from bamboo.tools.pilot_monitor import panda_pilot_status_tool
-from bamboo.tools.llm_passthrough import askpanda_llm_answer_tool
-from bamboo.tools.askpanda_answer import askpanda_answer_tool
+from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
+from bamboo.tools.bamboo_answer import bamboo_answer_tool
 from bamboo.tools.planner import bamboo_plan_tool
 from bamboo.prompts.templates import (
-    get_askpanda_system_prompt,
+    get_bamboo_system_prompt,
     get_failure_triage_prompt,
 )
 
 TOOLS = {
-    "askpanda_health": askpanda_health_tool,
-    "askpanda_llm_answer": askpanda_llm_answer_tool,
-    "askpanda_answer": askpanda_answer_tool,
+    "bamboo_health": bamboo_health_tool,
+    "bamboo_llm_answer": bamboo_llm_answer_tool,
+    "bamboo_answer": bamboo_answer_tool,
     "bamboo_plan": bamboo_plan_tool,
     "panda_doc_search": panda_doc_search_tool,
     "panda_queue_info": panda_queue_info_tool,
@@ -77,10 +78,6 @@ def create_server() -> Server:  # pylint: disable=too-complex
     singletons can access it.
     """
     app: Server = Server(Config.SERVER_NAME)
-
-    # ---- Auth: token allowlist (used by HTTP transports; stdio ignores headers) ----
-    auth = TokenAuth.from_env()
-    setattr(app, "auth", auth)
 
     # ---- Phase 0: initialize multi-LLM selection + per-process client cache ----
     # Support both Config being a class of constants or a dataclass-like type.
@@ -102,6 +99,13 @@ def create_server() -> Server:  # pylint: disable=too-complex
     setattr(app, "model_registry", model_registry)
     setattr(app, "llm_selector", llm_selector)
     setattr(app, "llm_manager", llm_manager)
+
+    # ---- Auth: token allowlist (used by HTTP transports; stdio ignores headers) ----
+    # If no tokens are configured, auth is effectively disabled (dev-friendly).
+    # Configure via:
+    #   - BAMBOO_MCP_TOKENS_FILE=/path/to/tokens.txt
+    #   - or BAMBOO_MCP_TOKENS="client:token,client2:token2"
+    setattr(app, "auth", TokenAuth.from_env())
 
     # Also publish into runtime context so simple tool singletons can access it.
     set_llm_selector(llm_selector)
@@ -159,7 +163,7 @@ def create_server() -> Server:  # pylint: disable=too-complex
             `description` and optional `arguments` specification.
         """
         return [
-            {"name": "askpanda_system", "description": "Core system prompt"},
+            {"name": "bamboo_system", "description": "Core system prompt"},
             {
                 "name": "failure_triage",
                 "description": "Failure triage template",
@@ -178,7 +182,7 @@ def create_server() -> Server:  # pylint: disable=too-complex
         """Return the requested prompt payload.
 
         Args:
-            name: Prompt name (e.g. 'askpanda_system' or 'failure_triage').
+            name: Prompt name (e.g. 'bamboo_system' or 'failure_triage').
             arguments: Arguments mapping used to fill template values.
 
         Returns:
@@ -187,8 +191,8 @@ def create_server() -> Server:  # pylint: disable=too-complex
         Raises:
             ValueError: If the requested prompt name is unknown.
         """
-        if name == "askpanda_system":
-            return await get_askpanda_system_prompt()
+        if name == "bamboo_system":
+            return await get_bamboo_system_prompt()
         if name == "failure_triage":
             return await get_failure_triage_prompt((arguments or {}).get("log_text", ""))
         raise ValueError(f"Unknown prompt: {name}")

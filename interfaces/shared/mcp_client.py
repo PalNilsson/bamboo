@@ -24,7 +24,7 @@ import asyncio
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Literal, Callable, Tuple, Coroutine
+from typing import Any, Dict, List, Optional, Literal, Coroutine
 from typing import Any as _Any, TYPE_CHECKING
 
 import httpx

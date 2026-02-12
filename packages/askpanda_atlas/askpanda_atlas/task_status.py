@@ -1,5 +1,4 @@
-"""
-askpanda_atlas/task_status.py  (v3)
+"""ATLAS PanDA task status tool implementation.
 
 ATLAS PanDA task status tool implementation (canonical, async) extracted from legacy code.
 
@@ -22,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -30,7 +29,13 @@ logger = logging.getLogger(__name__)
 
 
 def _default_base_url() -> str:
-    """Best-effort base URL discovery with safe fallback."""
+    """Get a base URL with safe fallbacks.
+
+    Prefer a core helper if present; otherwise return the default BigPanDA URL.
+
+    Returns:
+        Base URL string for BigPanDA.
+    """
     # Prefer core helper if present (Bamboo core / AskPanDA core)
     for modpath in ("bamboo.tools.https", "bamboo_core.tools.https", "tools.https"):
         try:
@@ -43,13 +48,15 @@ def _default_base_url() -> str:
     return "https://bigpanda.cern.ch"
 
 
-
 def _fetch_jsonish(url: str, timeout: int = 30) -> Tuple[int, str, str, Optional[dict]]:
-    """
-    Fetch a URL expected to return JSON, but handle HTML/empty bodies robustly.
+    """Fetch a URL expected to return JSON, handling non-JSON responses.
+
+    Args:
+        url: URL to fetch.
+        timeout: HTTP request timeout in seconds.
 
     Returns:
-      (status_code, content_type, text, json_dict_or_none)
+        Tuple of (status_code, content_type, response_text, json_dict_or_none).
     """
     resp = requests.get(
         url,
@@ -78,6 +85,14 @@ def _fetch_jsonish(url: str, timeout: int = 30) -> Tuple[int, str, str, Optional
 
 
 def _job_counts_from_payload(payload: dict) -> Dict[str, int]:
+    """Count job statuses in the payload.
+
+    Args:
+        payload: Payload dict potentially containing job lists.
+
+    Returns:
+        Mapping of job status to count.
+    """
     jobs = None
     for key in ("jobs", "jobList", "joblist"):
         if isinstance(payload.get(key), list):
@@ -96,6 +111,14 @@ def _job_counts_from_payload(payload: dict) -> Dict[str, int]:
 
 
 def _datasets_summary(payload: dict) -> dict:
+    """Summarize dataset statuses and file counts in the payload.
+
+    Args:
+        payload: Payload dict potentially containing datasets.
+
+    Returns:
+        Summary dict with counts and a small list of problematic datasets.
+    """
     datasets = payload.get("datasets")
     if not isinstance(datasets, list):
         return {}
@@ -157,6 +180,11 @@ def _datasets_summary(payload: dict) -> dict:
 
 
 def get_definition() -> dict:
+    """Get the MCP tool definition.
+
+    Returns:
+        Dictionary describing the tool name, schema, examples, and tags.
+    """
     return {
         "name": "task_status",
         "description": "Fetch PanDA task metadata from BigPanDA and return structured evidence for summarization.",
@@ -177,13 +205,29 @@ def get_definition() -> dict:
 
 
 class _Tool:
+    """Tool wrapper exposing MCP-compatible definition and call interface."""
+
     def __init__(self):
+        """Initialize the tool definition cache."""
         self._def = get_definition()
 
     def get_definition(self) -> dict:
+        """Get the MCP tool definition.
+
+        Returns:
+            Tool definition dictionary.
+        """
         return self._def
 
     async def call(self, arguments: dict) -> dict:
+        """Fetch task status and return structured evidence.
+
+        Args:
+            arguments: Tool input dict with required 'task_id' and optional fields.
+
+        Returns:
+            Dict with 'evidence' and optional 'text' summary.
+        """
         if not isinstance(arguments, dict):
             return {"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}
 

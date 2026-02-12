@@ -1,4 +1,4 @@
-"""Bamboo CLI (core)
+"""Bamboo CLI core.
 
 Minimal command-line interface for inspecting the Bamboo installation.
 Currently supports:
@@ -18,6 +18,14 @@ from bamboo.tools import loader
 
 
 def cmd_tools_list(args: argparse.Namespace) -> int:
+    """List discovered tool entry points and print them.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Process exit code.
+    """
     items = loader.list_tool_entry_points()
     if args.json:
         print(json.dumps(items, indent=2, sort_keys=True))
@@ -26,14 +34,22 @@ def cmd_tools_list(args: argparse.Namespace) -> int:
             print("No tool entry points found.")
             return 0
         # Simple aligned output
-        w_group = max(len(i.get("group","")) for i in items)
-        w_name = max(len(i.get("name","")) for i in items)
+        w_group = max(len(i.get("group", "")) for i in items)
+        w_name = max(len(i.get("name", "")) for i in items)
         for i in items:
             print(f"{i['group']:<{w_group}}  {i['name']:<{w_name}}  {i['value']}")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the Bamboo CLI entry point.
+
+    Args:
+        argv: Optional list of CLI arguments excluding the program name.
+
+    Returns:
+        Process exit code.
+    """
     argv = argv if argv is not None else sys.argv[1:]
     p = argparse.ArgumentParser(prog="bamboo")
     sub = p.add_subparsers(dest="cmd", required=True)

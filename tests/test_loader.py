@@ -1,4 +1,3 @@
-import pytest
 from bamboo.tools import loader
 
 

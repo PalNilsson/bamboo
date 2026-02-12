@@ -1,3 +1,5 @@
+"""LLM package exports."""
+
 from bamboo.llm.types import Message, LLMResponse, ModelSpec, GenerateParams
 from bamboo.llm.selector import LLMSelector
 from bamboo.llm.registry import ModelRegistry

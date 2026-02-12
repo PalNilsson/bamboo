@@ -14,10 +14,11 @@ class ModelRegistry:
     Example:
         profiles["fast"] -> ModelSpec(provider="anthropic", model="claude-...")
     """
+
     profiles: dict[str, ModelSpec]
 
     def get(self, profile: str) -> ModelSpec:
-        """Gets a profile ModelSpec.
+        """Get a profile ModelSpec.
 
         Args:
             profile: Profile name.

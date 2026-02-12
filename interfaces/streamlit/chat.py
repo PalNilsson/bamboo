@@ -16,7 +16,7 @@
 # under the License.
 
 """
-AskPanDA Streamlit Chat UI (MCP-first)
+AskPanDA Streamlit Chat UI.
 
 This Streamlit app connects to an AskPanDA MCP server using either:
   - STDIO transport (dev): spawns `python -m bamboo.server`
@@ -506,7 +506,7 @@ def _manual_tool_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
 
 
 def _chat_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
-    """Renders the main chat UI.
+    """Render the main chat UI.
 
     This implementation keeps the chat input fixed at the bottom by:
     - recording the submitted user message and triggering a rerun
@@ -569,7 +569,7 @@ def _chat_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
 
 
 def main() -> None:
-    """Main Streamlit entrypoint."""
+    """Prepare Main Streamlit entrypoint."""
     st.set_page_config(page_title="AskPanDA (MCP)", layout="wide")
 
     # Style tweaks: remove the red focus border on the chat input.
