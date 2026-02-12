@@ -1,3 +1,5 @@
+"""Mistral LLM client implementation."""
+
 from __future__ import annotations
 
 import asyncio
@@ -21,11 +23,17 @@ class MistralLLMClient(LLMClient):
     """
 
     def __init__(self, model_spec) -> None:
+        """Initialize the client with a model spec.
+
+        Args:
+            model_spec: Model specification for this client.
+        """
         super().__init__(model_spec)
         self._client: Any | None = None  # mistralai.Mistral (kept Any to avoid import at module import time)
         self._lock = asyncio.Lock()
 
     async def close(self) -> None:
+        """Close any underlying client resources."""
         if self._client is not None:
             await self._client.__aexit__(None, None, None)
             self._client = None
@@ -62,7 +70,7 @@ class MistralLLMClient(LLMClient):
         return self._client
 
     def _normalize_messages(self, messages: Sequence[Message]) -> list[dict[str, str]]:
-        """Converts normalized messages into Mistral SDK chat message dicts."""
+        """Convert normalized messages into Mistral SDK chat message dicts."""
         out: list[dict[str, str]] = []
         for m in messages:
             role = m.get("role", "user")
@@ -83,7 +91,7 @@ class MistralLLMClient(LLMClient):
         return out
 
     async def generate(self, messages: Sequence[Message], params: GenerateParams) -> LLMResponse:
-        """Generates a completion using Mistral.
+        """Generate a completion using Mistral.
 
         Args:
             messages: Normalized messages.
