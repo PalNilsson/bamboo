@@ -22,15 +22,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
 
-      - name: Install dev dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
           python -m pip install -r requirements-dev.txt
-
-      # If your project is a package that needs installing for imports, add:
-      # - name: Install package
-      #   run: |
-      #     python -m pip install -e .
+          python -m pip install -e core/
+          python -m pip install -e packages/askpanda_atlas/
+          python -m pip install -e packages/askpanda_epic/
+          python -m pip install -e packages/askpanda_verarubin/
 
       - name: flake8
         run: |

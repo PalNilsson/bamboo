@@ -2,4 +2,5 @@ flake8
 pylint
 pydocstyle
 pyright
+pytest
 circular-import-detector==1.0.18

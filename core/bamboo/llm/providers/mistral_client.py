@@ -61,11 +61,12 @@ class MistralLLMClient(LLMClient):
                 # pylint: disable=import-outside-toplevel, unnecessary-dunder-call
                 from mistralai import Mistral  # type: ignore
 
-                self._client = Mistral(api_key=api_key)
+                client = Mistral(api_key=api_key)
 
                 # The SDK supports async context manager usage; enter the async context
                 # to initialize the client instance (we keep the instance for reuse).
-                await self._client.__aenter__()
+                await client.__aenter__()
+                self._client = client
 
         return self._client
 
