@@ -50,8 +50,8 @@ import json
 import math
 import secrets
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -67,7 +67,7 @@ class TokenRecord:
     token: str
 
 
-def dedupe_preserve_order(items: Sequence[str]) -> List[str]:
+def dedupe_preserve_order(items: Sequence[str]) -> list[str]:
     """De-duplicate a sequence while preserving the original order.
 
     Args:
@@ -77,7 +77,7 @@ def dedupe_preserve_order(items: Sequence[str]) -> List[str]:
         A list with duplicates removed, preserving first occurrence order.
     """
     seen: set[str] = set()
-    out: List[str] = []
+    out: list[str] = []
     for item in items:
         if item not in seen:
             seen.add(item)
@@ -104,7 +104,7 @@ def bits_to_nbytes(bits: int) -> int:
     return int(math.ceil(bits / 8))
 
 
-def generate_tokens(client_ids: List[str], bits: int) -> List[TokenRecord]:
+def generate_tokens(client_ids: list[str], bits: int) -> list[TokenRecord]:
     """Generate a token for each client id.
 
     Args:
@@ -118,7 +118,7 @@ def generate_tokens(client_ids: List[str], bits: int) -> List[TokenRecord]:
     return [TokenRecord(cid, secrets.token_urlsafe(nbytes)) for cid in client_ids]
 
 
-def parse_tokens_txt_line(line: str) -> Tuple[str, str]:
+def parse_tokens_txt_line(line: str) -> tuple[str, str]:
     """Parse a line from a tokens.txt file.
 
     Supported formats:
@@ -185,7 +185,7 @@ def emit_env(records: Sequence[TokenRecord]) -> str:
     if len(records_list) == 1:
         return f'BAMBOO_TOKEN="{records_list[0].token}"\n'
 
-    lines: List[str] = []
+    lines: list[str] = []
     for r in records_list:
         key = "BAMBOO_TOKEN_" + r.client_id.upper().replace("-", "_")
         lines.append(f'{key}="{r.token}"')
@@ -201,7 +201,7 @@ def emit_json(records: Sequence[TokenRecord]) -> str:
     Returns:
         JSON string (pretty-printed).
     """
-    payload: Dict[str, str] = {r.client_id: r.token for r in records}
+    payload: dict[str, str] = {r.client_id: r.token for r in records}
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
@@ -214,7 +214,7 @@ def emit_markdown(records: Sequence[TokenRecord]) -> str:
     Returns:
         Markdown formatted string listing tokens by client id.
     """
-    lines: List[str] = ["# Bamboo tokens", ""]
+    lines: list[str] = ["# Bamboo tokens", ""]
     for r in records:
         lines.append(f"- **{r.client_id}**: `{r.token}`")
     lines.append("")
@@ -300,7 +300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Use --min-bits to override if you really want this."
         )
 
-    raw_clients: List[str] = args.clients or ["bamboo-dev"]
+    raw_clients: list[str] = args.clients or ["bamboo-dev"]
     cleaned_clients = [c.strip() for c in raw_clients if c.strip()]
     clients = dedupe_preserve_order(cleaned_clients)
     if not clients:

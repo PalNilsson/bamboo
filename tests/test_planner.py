@@ -59,7 +59,7 @@ def test_planner_tool_repairs_invalid_first_response(monkeypatch):
 
     calls = {"n": 0}
 
-    async def fake_call_default_llm(messages, temperature, max_tokens):
+    async def fake_call_default_llm(_messages, _temperature, _max_tokens):
         calls["n"] += 1
         if calls["n"] == 1:
             return "not json at all"

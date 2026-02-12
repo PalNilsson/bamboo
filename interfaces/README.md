@@ -4,9 +4,9 @@ This folder contains UI/front-end interfaces that talk to the AskPanDA MCP serve
 
 ## Layout
 
-- `interfaces/shared/` – shared client helpers (e.g., MCP connection wrappers)
-- `interfaces/streamlit/` – Streamlit UI
-- `interfaces/open_webui/` – placeholder for a future Open WebUI integration
+- `interfaces/shared/` - shared client helpers (e.g., MCP connection wrappers)
+- `interfaces/streamlit/` - Streamlit UI
+- `interfaces/open_webui/` - placeholder for a future Open WebUI integration
 
 ## Streamlit
 

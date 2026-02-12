@@ -23,9 +23,9 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Literal, Coroutine
-from typing import Any as _Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 import httpx
 
@@ -37,10 +37,10 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 if TYPE_CHECKING:
     try:
         from mcp.client.streamable_http import streamable_http_client  # type: ignore
-    except Exception:  # pragma: no cover - only for static analysis
+    except Exception:  # pylint: disable=broad-exception-caught  # pragma: no cover - only for static analysis
         streamable_http_client = None  # type: ignore
 
-streamable_http_client: _Any = None
+streamable_http_client: Any = None
 
 
 TransportType = Literal["stdio", "http"]
@@ -65,12 +65,12 @@ class MCPServerConfig:
 
     # stdio options
     stdio_command: str = field(default_factory=lambda: sys.executable)
-    stdio_args: List[str] = field(default_factory=lambda: ["-m", "bamboo.server"])
-    stdio_env: Optional[Dict[str, str]] = None
+    stdio_args: list[str] = field(default_factory=lambda: ["-m", "bamboo.server"])
+    stdio_env: dict[str, str] | None = None
 
     # http options
     http_url: str = "http://localhost:8000/mcp"
-    http_headers: Optional[Dict[str, str]] = None
+    http_headers: dict[str, str] | None = None
     terminate_on_close: bool = True
     http_timeout_s: float = 30.0
 
@@ -85,16 +85,16 @@ class MCPAsyncClient:
             cfg: Server connection configuration.
         """
         self.cfg = cfg
-        self._session: Optional[ClientSession] = None
+        self._session: ClientSession | None = None
 
         # Underlying transport context manager (stdio_client or streamable_http_client)
         self._transport_cm: Any = None
 
         # For HTTP: keep a configured AsyncClient if headers are needed
-        self._http_client: Optional[httpx.AsyncClient] = None
+        self._http_client: httpx.AsyncClient | None = None
 
         # For debugging/observability
-        self.http_session_id: Optional[str] = None
+        self.http_session_id: str | None = None
 
     async def connect(self) -> "MCPAsyncClient":
         """Connect and initialize the MCP session.
@@ -112,7 +112,7 @@ class MCPAsyncClient:
                 env=self.cfg.stdio_env,
             )
             self._transport_cm = stdio_client(params)
-            read_stream, write_stream = await self._transport_cm.__aenter__()
+            read_stream, write_stream = await self._transport_cm.__aenter__()  # pylint: disable=unnecessary-dunder-call
 
         else:
             # Build HTTP client if headers are needed (auth, etc.)
@@ -120,11 +120,11 @@ class MCPAsyncClient:
             self._http_client = httpx.AsyncClient(headers=self.cfg.http_headers, timeout=timeout)
 
             # Dynamically import the helper using importlib and getattr to avoid static attribute access checks
-            import importlib
+            import importlib  # pylint: disable=import-outside-toplevel
             try:
                 _mod = importlib.import_module("mcp.client.streamable_http")
                 func = getattr(_mod, "streamable_http_client", None)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 func = None
 
             if func is None:
@@ -136,14 +136,14 @@ class MCPAsyncClient:
                 http_client=self._http_client,
                 terminate_on_close=self.cfg.terminate_on_close,
             )
-            read_stream, write_stream, get_session_id = await self._transport_cm.__aenter__()
+            read_stream, write_stream, get_session_id = await self._transport_cm.__aenter__()  # pylint: disable=unnecessary-dunder-call
             try:
                 self.http_session_id = get_session_id()
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 self.http_session_id = None
 
         self._session = ClientSession(read_stream, write_stream)
-        await self._session.__aenter__()
+        await self._session.__aenter__()  # pylint: disable=unnecessary-dunder-call
 
         # Initialize MCP session
         await self._session.initialize()
@@ -184,7 +184,7 @@ class MCPAsyncClient:
             raise RuntimeError("MCP session not connected.")
         return await self._session.list_prompts()
 
-    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """Call an MCP tool.
 
         Args:
@@ -268,11 +268,11 @@ class MCPClientSync:
         """List prompts (sync)."""
         return self._run(self._client.list_prompts())
 
-    def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+    def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """Call tool (sync)."""
         return self._run(self._client.call_tool(name, arguments))
 
     @property
-    def http_session_id(self) -> Optional[str]:
+    def http_session_id(self) -> str | None:
         """Return HTTP MCP session id if using HTTP transport."""
         return self._client.http_session_id

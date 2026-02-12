@@ -36,13 +36,15 @@ It must expose:
 Run:
   streamlit run interfaces/streamlit/chat.py
 """
+# pylint: disable=no-member  # streamlit uses dynamic attributes
 
 from __future__ import annotations
 
 import json
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 import textwrap
 import streamlit as st
@@ -112,8 +114,8 @@ st.markdown(_CHAT_CSS, unsafe_allow_html=True)
 # -----------------------------
 # Types
 # -----------------------------
-JSONDict = Dict[str, Any]
-JSONList = List[Any]
+JSONDict = dict[str, Any]
+JSONList = list[Any]
 
 
 @dataclass(frozen=True)
@@ -138,7 +140,7 @@ class UIConfig:
 # -----------------------------
 # Helpers (pure, no widgets)
 # -----------------------------
-def _safe_parse_json_list(value: str, fallback: Optional[List[str]] = None) -> List[str]:
+def _safe_parse_json_list(value: str, fallback: list[str] | None = None) -> list[str]:
     """Parse a JSON list of strings, returning a fallback on error.
 
     Args:
@@ -154,22 +156,22 @@ def _safe_parse_json_list(value: str, fallback: Optional[List[str]] = None) -> L
         parsed = json.loads(value)
         if not isinstance(parsed, list):
             return fallback
-        out: List[str] = []
+        out: list[str] = []
         for item in parsed:
             out.append(str(item))
         return out
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         return fallback
 
 
-def _safe_parse_json_dict(value: str) -> Optional[Dict[str, str]]:
+def _safe_parse_json_dict(value: str) -> dict[str, str] | None:
     """Parse a JSON dict of string keys/values.
 
     Args:
         value: JSON string that should decode to a dict. Empty string => None.
 
     Returns:
-        Dict[str, str] if valid, otherwise None.
+        dict[str, str] if valid, otherwise None.
     """
     if not value.strip():
         return None
@@ -177,11 +179,11 @@ def _safe_parse_json_dict(value: str) -> Optional[Dict[str, str]]:
         parsed = json.loads(value)
         if not isinstance(parsed, dict):
             return None
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for k, v in parsed.items():
             out[str(k)] = str(v)
         return out
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         return None
 
 
@@ -204,7 +206,7 @@ def _extract_text_from_content(content_items: Any) -> str:
     if hasattr(content_items, "content"):
         content_items = getattr(content_items, "content")
 
-    parts: List[str] = []
+    parts: list[str] = []
 
     if isinstance(content_items, str):
         return content_items
@@ -236,11 +238,11 @@ def _extract_text_from_content(content_items: Any) -> str:
     # Fallback
     try:
         return json.dumps(content_items, indent=2)
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         return str(content_items)
 
 
-def _tool_names(tools_result: Any) -> List[str]:
+def _tool_names(tools_result: Any) -> list[str]:
     """Extract tool names from `session.list_tools()` results.
 
     Different MCP versions return different shapes:
@@ -258,7 +260,7 @@ def _tool_names(tools_result: Any) -> List[str]:
     if hasattr(tools_result, "tools"):
         tools_result = getattr(tools_result, "tools")
 
-    names: List[str] = []
+    names: list[str] = []
     if tools_result is None:
         return names
 
@@ -279,7 +281,7 @@ def _tool_names(tools_result: Any) -> List[str]:
     return sorted(set(names))
 
 
-def _prompt_names(prompts_result: Any) -> List[str]:
+def _prompt_names(prompts_result: Any) -> list[str]:
     """Extract prompt names from `session.list_prompts()` results.
 
     Args:
@@ -291,7 +293,7 @@ def _prompt_names(prompts_result: Any) -> List[str]:
     if hasattr(prompts_result, "prompts"):
         prompts_result = getattr(prompts_result, "prompts")
 
-    names: List[str] = []
+    names: list[str] = []
     if prompts_result is None:
         return names
 
@@ -310,7 +312,7 @@ def _prompt_names(prompts_result: Any) -> List[str]:
     return sorted(set(names))
 
 
-def _guess_auto_tool(question: str, available_tools: Sequence[str]) -> Tuple[str, JSONDict]:
+def _guess_auto_tool(question: str, available_tools: Sequence[str]) -> tuple[str, JSONDict]:
     """Pick a reasonable tool + arguments based on a question (light heuristic).
 
     This avoids requiring a server-side orchestration tool while you're bootstrapping.
@@ -446,7 +448,7 @@ def _sidebar_config() -> UIConfig:
     )
 
 
-def _render_connection_status(mcp: MCPClientSync) -> Tuple[List[str], List[str]]:
+def _render_connection_status(mcp: MCPClientSync) -> tuple[list[str], list[str]]:
     """Fetch and display tools/prompts.
 
     Args:
@@ -580,14 +582,14 @@ def main() -> None:
     # Build (cached) MCP client – widgets are already done above
     try:
         mcp = _get_mcp_client(cfg)
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         st.error(f"Failed to create MCP client: {e}")
         st.stop()
 
     # Show tools/prompts
     try:
-        tool_names, _prompt_names_list = _render_connection_status(mcp)
-    except Exception as e:
+        tool_names, _ = _render_connection_status(mcp)
+    except Exception as e:  # pylint: disable=broad-exception-caught
         st.error(f"Failed to list tools/prompts: {e}")
         st.stop()
 

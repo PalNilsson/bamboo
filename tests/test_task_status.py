@@ -29,7 +29,7 @@ def test_task_status_success_json(monkeypatch):
         ],
     }
 
-    def fake_get(url, timeout=30, headers=None, allow_redirects=True):
+    def fake_get(_url, _timeout=30, _headers=None, _allow_redirects=True):
         return DummyResp(status_code=200, json_data=sample, text=json.dumps(sample))
 
     monkeypatch.setattr("requests.get", fake_get)
@@ -47,7 +47,7 @@ def test_task_status_success_json(monkeypatch):
 def test_task_status_non_json(monkeypatch):
     html = "<html><body>error</body></html>"
 
-    def fake_get(url, timeout=30, headers=None, allow_redirects=True):
+    def fake_get(_url, _timeout=30, _headers=None, _allow_redirects=True):
         return DummyResp(status_code=200, headers={"content-type": "text/html"}, text=html, json_data=None)
 
     monkeypatch.setattr("requests.get", fake_get)
@@ -62,7 +62,7 @@ def test_task_status_non_json(monkeypatch):
 
 
 def test_task_status_404(monkeypatch):
-    def fake_get(url, timeout=30, headers=None, allow_redirects=True):
+    def fake_get(_url, _timeout=30, _headers=None, _allow_redirects=True):
         return DummyResp(status_code=404, headers={"content-type": "text/html"}, text="", json_data=None)
 
     monkeypatch.setattr("requests.get", fake_get)
