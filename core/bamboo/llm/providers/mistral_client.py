@@ -102,6 +102,7 @@ class MistralLLMClient(LLMClient):
             Normalized LLMResponse.
 
         Raises:
+            LLMConfigError: If the model spec is invalid.
             LLMProviderError: For provider errors.
             LLMTimeoutError: For request timeouts (if we can detect them).
         """
@@ -152,7 +153,7 @@ class MistralLLMClient(LLMClient):
                                 output_tokens=output_tokens,
                                 total_tokens=total_tokens,
                             )
-                    except Exception:  # pragma: no cover - best-effort parsing
+                    except Exception:  # pylint: disable=broad-exception-caught  # pragma: no cover - best-effort parsing
                         usage = None
 
                     return LLMResponse(text=text, usage=usage, raw=res)

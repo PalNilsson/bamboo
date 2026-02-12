@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import re
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -47,7 +47,7 @@ class ToolCall(BaseModel):
         ..., min_length=1, description="Tool name as used by Bamboo (e.g., 'panda_task_status' or 'atlas.task_status')."
     )
     arguments: dict[str, Any] = Field(default_factory=dict, description="JSON arguments to pass to the tool.")
-    namespace: Optional[str] = Field(
+    namespace: str | None = Field(
         default=None,
         description=(
             "Optional namespace hint used when resolving tools via entry points (e.g., 'atlas'). "
@@ -93,7 +93,7 @@ class Plan(BaseModel):
         default_factory=list,
         description="Ordered list of tool calls to execute. Empty is allowed for RETRIEVE-only decisions.",
     )
-    retrieval_query: Optional[RetrievalQuery] = Field(
+    retrieval_query: RetrievalQuery | None = Field(
         default=None,
         description="Optional retrieval instruction. Not required until DB/vector store integration.",
     )
@@ -164,7 +164,7 @@ def extract_first_json_object(text: str) -> str:
         try:
             json.loads(snippet)
             return snippet
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             continue
     raise ValueError("Unable to extract valid JSON object")
 
@@ -195,7 +195,7 @@ def build_planner_system_prompt(schema: dict[str, Any]) -> str:
 def build_planner_user_prompt(
     question: str,
     tool_catalog: list[dict[str, Any]],
-    hints: Optional[dict[str, Any]] = None,
+    hints: dict[str, Any] | None = None,
 ) -> str:
     """Build the user prompt for the planner.
 
@@ -209,9 +209,10 @@ def build_planner_user_prompt(
     """
     payload = {
         "question": question,
-        "hints": hints or {},
-        "tools": tool_catalog,
+        "tool_catalog": tool_catalog,
     }
+    if hints:
+        payload["hints"] = hints
     return (
         "Given the user's question, choose the best route and propose tool calls. "
         "Use the hints if they are present.\n\n"
@@ -220,7 +221,7 @@ def build_planner_user_prompt(
     )
 
 
-def _collect_tool_catalog(namespaces: Optional[list[str]] = None) -> list[dict[str, Any]]:
+def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str, Any]]:
     """Collect a compact tool catalog for the planner.
 
     Args:
@@ -249,7 +250,7 @@ def _collect_tool_catalog(namespaces: Optional[list[str]] = None) -> list[dict[s
 
         try:
             d = resolved.obj.get_definition()  # type: ignore[attr-defined]
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             continue
 
         # Keep only the fields the planner needs.
@@ -340,7 +341,7 @@ class BambooPlannerTool:
         # Validate, with one optional repair attempt.
         try:
             plan = Plan.model_validate_json(extract_first_json_object(text))
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             repair_messages = messages + [
                 {
                     "role": "user",
@@ -354,7 +355,7 @@ class BambooPlannerTool:
             text2 = await _call_default_llm(repair_messages, temperature=0.0, max_tokens=max_tokens)
             try:
                 plan = Plan.model_validate_json(extract_first_json_object(text2))
-            except Exception as e2:
+            except Exception as e2:  # pylint: disable=broad-exception-caught
                 raise ValueError(f"Planner output did not validate after repair attempt: {e2}") from e2
 
         # Pydantic's JSON helpers intentionally limit json.dumps kwargs.

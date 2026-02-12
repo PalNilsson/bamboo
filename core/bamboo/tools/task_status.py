@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import importlib
-from typing import Any, Optional
+from typing import Any
 
 # Try to import a real implementation under a different name first to avoid self-import.
 _real = None
@@ -31,7 +31,7 @@ for name in candidates:
         if mod is not None and getattr(mod, "__name__", "") != __name__:
             _real = mod
             break
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         _import_errors.append((name, repr(e)))
         continue
 
@@ -41,12 +41,12 @@ if _real is None:
         mod_plain = importlib.import_module("task_status")
         if getattr(mod_plain, "__name__", "") != __name__:
             _real = mod_plain
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         _import_errors.append(("task_status", repr(e)))
         _real = None
 
 
-def _find_callable_in_module(mod: Any) -> Optional[Any]:
+def _find_callable_in_module(module: Any) -> Any | None:
     """Find a callable function in a module for task status.
 
     Searches for a callable in this order:
@@ -55,21 +55,21 @@ def _find_callable_in_module(mod: Any) -> Optional[Any]:
     - Common function names (panda_task_status, get_task_status, task_status, run, handle)
 
     Args:
-        mod: Module object to search.
+        module: Module object to search.
 
     Returns:
         Callable function, or None if not found.
     """
     # If module defines a canonical tool object with .call, use that
-    if hasattr(mod, "panda_task_status_tool") and hasattr(mod.panda_task_status_tool, "call"):
-        return getattr(mod, "panda_task_status_tool").call  # may be async or sync
+    if hasattr(module, "panda_task_status_tool") and hasattr(module.panda_task_status_tool, "call"):
+        return getattr(module, "panda_task_status_tool").call  # may be async or sync
     # module-level call()
-    if hasattr(mod, "call") and callable(mod.call):
-        return mod.call
+    if hasattr(module, "call") and callable(module.call):
+        return module.call
     # common function names
-    for name in ("panda_task_status", "get_task_status", "task_status", "run", "handle"):
-        if hasattr(mod, name) and callable(getattr(mod, name)):
-            return getattr(mod, name)
+    for func_name in ("panda_task_status", "get_task_status", "task_status", "run", "handle"):
+        if hasattr(module, func_name) and callable(getattr(module, func_name)):
+            return getattr(module, func_name)
     return None
 
 
@@ -103,10 +103,10 @@ def _wrap_callable(fn: Any) -> Any:
         async def _async_fn(args: dict[str, Any]) -> Any:
             return await fn(args)
         return _async_fn
-    else:
-        async def _async_fn(args: dict[str, Any]) -> Any:
-            return await asyncio.to_thread(fn, args)
-        return _async_fn
+
+    async def _sync_to_async(args: dict[str, Any]) -> Any:
+        return await asyncio.to_thread(fn, args)
+    return _sync_to_async
 
 
 _detected_callable = None
@@ -133,7 +133,7 @@ class _Tool:
         if _real is not None and hasattr(_real, "get_definition"):
             try:
                 base_def: dict[str, Any] = _real.get_definition() or {}
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 base_def = {}
         else:
             base_def = {}
@@ -162,7 +162,7 @@ class _Tool:
         if _real is not None:
             try:
                 self._def.setdefault("metadata", {})["detected_module"] = getattr(_real, "__name__", "unknown")
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 pass
 
     def get_definition(self) -> dict[str, Any]:
@@ -194,24 +194,21 @@ class _Tool:
                     fn: Any = _real.panda_task_status_tool.call
                     if inspect.iscoroutinefunction(fn):
                         return await fn(arguments)
-                    else:
-                        return await asyncio.to_thread(fn, arguments)
+                    return await asyncio.to_thread(fn, arguments)
                 # module-level call
                 if hasattr(_real, "call") and callable(_real.call):
                     fn = _real.call
                     if inspect.iscoroutinefunction(fn):
                         return await fn(arguments)
-                    else:
-                        return await asyncio.to_thread(fn, arguments)
+                    return await asyncio.to_thread(fn, arguments)
                 # fallback: detect common function names
-                for name in ("panda_task_status", "get_task_status", "task_status", "run", "handle"):
-                    if hasattr(_real, name) and callable(getattr(_real, name)):
-                        fn = getattr(_real, name)
+                for func_name in ("panda_task_status", "get_task_status", "task_status", "run", "handle"):
+                    if hasattr(_real, func_name) and callable(getattr(_real, func_name)):
+                        fn = getattr(_real, func_name)
                         if inspect.iscoroutinefunction(fn):
                             return await fn(arguments)
-                        else:
-                            return await asyncio.to_thread(fn, arguments)
-            except Exception as e:
+                        return await asyncio.to_thread(fn, arguments)
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 # If the underlying implementation raises, return the exception info for debugging
                 return {"error": "underlying task_status raised", "exception": repr(e), "provided_arguments": arguments}
 

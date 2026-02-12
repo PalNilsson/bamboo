@@ -5,8 +5,9 @@ supporting both primary and legacy tool groups.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Optional, Iterable
+from typing import Any
 
 from importlib.metadata import entry_points
 
@@ -46,10 +47,9 @@ def _iter_entry_points(groups: Iterable[str]) -> Any:
     for g in groups:
         try:
             selected = eps.select(group=g)  # type: ignore[attr-defined]
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             selected = eps.get(g, []) if isinstance(eps, dict) else []
-        for ep in selected:
-            yield ep
+        yield from selected
 
 
 def list_tool_entry_points() -> list[dict[str, str]]:
@@ -64,7 +64,7 @@ def list_tool_entry_points() -> list[dict[str, str]]:
     return out
 
 
-def find_tool_by_name(tool_name: str, namespace: Optional[str] = None) -> Optional[ResolvedTool]:
+def find_tool_by_name(tool_name: str, namespace: str | None = None) -> ResolvedTool | None:
     """Find and load a tool by name, optionally filtered by namespace.
 
     Searches for entry points matching the given tool name across primary and
@@ -86,13 +86,12 @@ def find_tool_by_name(tool_name: str, namespace: Optional[str] = None) -> Option
             if namespace:
                 if ep_name != f"{namespace}.{tool_name}":
                     continue
-            else:
-                if wanted_suffix and not ep_name.endswith(wanted_suffix):
-                    continue
+            elif wanted_suffix and not ep_name.endswith(wanted_suffix):
+                continue
 
             try:
                 obj: Any = ep.load()
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 continue
 
             ns: str

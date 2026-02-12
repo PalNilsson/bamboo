@@ -43,7 +43,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Awaitable, Callable, MutableMapping, Sequence
+from collections.abc import Awaitable, Callable, MutableMapping, Sequence
+from typing import Any
 from urllib.parse import parse_qs
 
 from mcp.server.streamable_http import StreamableHTTPServerTransport

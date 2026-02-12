@@ -67,7 +67,7 @@ def _compact(obj: Any, limit: int = 6000) -> str:
     """
     try:
         s = json.dumps(obj, ensure_ascii=False, sort_keys=True)
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         s = str(obj)
     if len(s) > limit:
         return s[:limit] + "…(truncated)"

@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -39,13 +38,13 @@ def _default_base_url() -> str:
         Base URL for BigPanDA API.
     """
     try:
-        from tools.https import get_base_url  # type: ignore
+        from tools.https import get_base_url  # type: ignore  # pylint: disable=import-outside-toplevel
         return get_base_url()
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         return "https://bigpanda.cern.ch"
 
 
-def _fetch_jsonish(url: str, timeout: int = 30) -> Tuple[int, str, str, Optional[dict]]:
+def _fetch_jsonish(url: str, timeout: int = 30) -> tuple[int, str, str, dict | None]:
     """Fetch a URL expected to return JSON, handling non-JSON responses robustly.
 
     Handles HTML, empty bodies, redirects, and HTTP errors gracefully without
@@ -81,11 +80,11 @@ def _fetch_jsonish(url: str, timeout: int = 30) -> Tuple[int, str, str, Optional
         if isinstance(data, dict):
             return status, ctype, text, data
         return status, ctype, text, {"_data": data}
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         return status, ctype, text, None
 
 
-def _job_counts_from_payload(payload: dict) -> Dict[str, int]:
+def _job_counts_from_payload(payload: dict) -> dict[str, int]:
     """Extract and count job statuses from payload.
 
     Searches for jobs list in payload and counts occurrences of each job status.
@@ -147,12 +146,7 @@ def _datasets_summary(payload: dict) -> dict:
         st = ds.get("status") or ""
         if isinstance(st, str) and st:
             status_counts[st] += 1
-        for k, acc in (
-            ("nfilesfailed", "nfilesfailed_total"),
-            ("nfilesfinished", "nfilesfinished_total"),
-            ("nfileswaiting", "nfileswaiting_total"),
-            ("nfilesmissing", "nfilesmissing_total"),
-        ):
+        for k in ("nfilesfailed", "nfilesfinished", "nfileswaiting", "nfilesmissing"):
             v = ds.get(k)
             if isinstance(v, int):
                 if k == "nfilesfailed":
@@ -254,7 +248,7 @@ class _Tool:
 
         try:
             task_id_int: int = int(task_id)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             return {"evidence": {"error": "task_id must be an integer", "provided": arguments}}
 
         include_jobs: bool = bool(arguments.get("include_jobs", True))
@@ -262,7 +256,7 @@ class _Tool:
         timeout: int = arguments.get("timeout") or 30
         try:
             timeout = int(timeout)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             timeout = 30
 
         base_url: str = _default_base_url().rstrip("/")
@@ -275,9 +269,9 @@ class _Tool:
             http_status: int
             content_type: str
             text: str
-            payload: Optional[dict]
+            payload: dict | None
             http_status, content_type, text, payload = await asyncio.to_thread(_fetch_jsonish, json_url, timeout)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             return {
                 "evidence": {
                     "task_id": task_id_int,
@@ -312,17 +306,17 @@ class _Tool:
 
         # Extract common task fields
         task: dict = payload.get("task", {}) if isinstance(payload.get("task"), dict) else {}
-        status: Optional[str] = (task.get("status") if isinstance(task, dict) else None) or payload.get("status")
-        superstatus: Optional[str] = task.get("superstatus") if isinstance(task, dict) else None
-        taskname: Optional[str] = task.get("taskname") if isinstance(task, dict) else None
-        username: Optional[str] = task.get("username") if isinstance(task, dict) else None
-        creationdate: Optional[str] = task.get("creationdate") if isinstance(task, dict) else None
-        starttime: Optional[str] = task.get("starttime") if isinstance(task, dict) else None
-        endtime: Optional[str] = task.get("endtime") if isinstance(task, dict) else None
-        dsinfo: Optional[str] = task.get("dsinfo") if isinstance(task, dict) else None
+        status: str | None = (task.get("status") if isinstance(task, dict) else None) or payload.get("status")
+        superstatus: str | None = task.get("superstatus") if isinstance(task, dict) else None
+        taskname: str | None = task.get("taskname") if isinstance(task, dict) else None
+        username: str | None = task.get("username") if isinstance(task, dict) else None
+        creationdate: str | None = task.get("creationdate") if isinstance(task, dict) else None
+        starttime: str | None = task.get("starttime") if isinstance(task, dict) else None
+        endtime: str | None = task.get("endtime") if isinstance(task, dict) else None
+        dsinfo: str | None = task.get("dsinfo") if isinstance(task, dict) else None
 
         datasets_summary: dict = _datasets_summary(payload) or {}
-        job_counts: Dict[str, int] = _job_counts_from_payload(payload) or {}
+        job_counts: dict[str, int] = _job_counts_from_payload(payload) or {}
 
         evidence = {
             "task_id": task_id_int,

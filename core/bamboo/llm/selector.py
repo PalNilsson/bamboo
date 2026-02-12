@@ -26,7 +26,6 @@ class LLMSelector:
 
         Args:
             task: High-level task category.
-            _tenant: Optional tenant identifier (future: per-tenant overrides).
 
         Returns:
             ModelSpec for the chosen profile.

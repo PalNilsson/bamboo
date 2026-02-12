@@ -75,6 +75,6 @@ class LLMClientManager:
         for client in clients:
             try:
                 await client.close()
-            except Exception:  # pylint: disable=broad-exception-caught - best-effort close
+            except Exception:  # pylint: disable=broad-exception-caught
                 # Best-effort close: don't fail shutdown due to provider cleanup.
                 pass

@@ -34,9 +34,9 @@ from __future__ import annotations
 
 import os
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Mapping, Optional, Tuple
 
 
 class TokenAuthError(ValueError):
@@ -56,7 +56,7 @@ class TokenAuthConfig:
     tokens_env: str = "BAMBOO_MCP_TOKENS"
 
 
-def _parse_tokens_line(line: str) -> Optional[Tuple[str, str]]:
+def _parse_tokens_line(line: str) -> tuple[str, str] | None:
     """Parse a single tokens file line.
 
     Supported formats:
@@ -92,7 +92,7 @@ def _parse_tokens_line(line: str) -> Optional[Tuple[str, str]]:
     return parts[0].strip(), parts[1].strip()
 
 
-def _load_tokens_from_file(path: Path) -> Dict[str, str]:
+def _load_tokens_from_file(path: Path) -> dict[str, str]:
     """Load tokens from a tokens.txt file.
 
     The returned mapping is token -> client_id.
@@ -103,7 +103,7 @@ def _load_tokens_from_file(path: Path) -> Dict[str, str]:
     Returns:
         Mapping from token string to client_id.
     """
-    mapping: Dict[str, str] = {}
+    mapping: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         parsed = _parse_tokens_line(line)
         if parsed is None:
@@ -113,7 +113,7 @@ def _load_tokens_from_file(path: Path) -> Dict[str, str]:
     return mapping
 
 
-def _load_tokens_from_env_value(value: str) -> Dict[str, str]:
+def _load_tokens_from_env_value(value: str) -> dict[str, str]:
     """Load tokens from an inline environment variable.
 
     Format:
@@ -130,7 +130,7 @@ def _load_tokens_from_env_value(value: str) -> Dict[str, str]:
     Returns:
         Mapping from token string to client_id.
     """
-    mapping: Dict[str, str] = {}
+    mapping: dict[str, str] = {}
     for raw in value.split(","):
         entry = raw.strip()
         if not entry:
