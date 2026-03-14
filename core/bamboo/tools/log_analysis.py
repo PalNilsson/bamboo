@@ -1,84 +1,258 @@
-"""Dummy log analysis tool (maps to your previous LogAnalysisAgent).
+"""PanDA job log analysis tool.
 
-Later:
-- download logs via PanDA job/task links
-- parse pilot/job logs
-- classify failures
-- optionally call LLM for narrative summary
+Downloads job metadata and pilot logs from BigPanDA via the
+``bigpanda-downloader`` MCP server and returns a structured failure
+analysis suitable for LLM summarisation.
+
+The upstream ``analyze_bigpanda_job_failure`` tool returns the same JSON
+metadata as ``download_bigpanda_metadata`` plus a pilot log section
+separated by a ``===...===`` divider.  This tool parses both parts and
+extracts key failure signals from the ``job`` dict and log text.
 """
 from __future__ import annotations
+
+import json
+import logging
+import re
 from typing import Any
-from .base import text_content
+
+from bamboo.tools._mcp_caller import get_mcp_caller
+
+logger = logging.getLogger(__name__)
+
+_SERVER = "bigpanda-downloader"
+_TOOL = "analyze_bigpanda_job_failure"
+
+# Error categories matched against combined job fields + log text
+_FAILURE_PATTERNS: list[tuple[str, list[str]]] = [
+    ("reassigned_by_jedi", ["reassigned by jedi", "toreassign"]),
+    ("timeout", ["timeout", "timed out", "walltime", "cpu time exceeded", "tobekilled"]),
+    ("segfault", ["segmentation fault", "sigsegv", "signal 11"]),
+    ("disk_full", ["no space left", "disk quota", "disk full"]),
+    ("memory", ["out of memory", "oom killer", "memory limit"]),
+    ("network", ["connection refused", "network unreachable", "dns failure", "socket"]),
+    ("input_missing", ["no such file", "file not found", "input file missing"]),
+    ("pilot_error", ["piloterrorcode"]),
+    ("software_error", ["exception", "traceback", "abort", "core dump"]),
+]
+
+_DIVIDER_RE = re.compile(r"={10,}")
+
+
+def get_definition() -> dict[str, Any]:
+    """Return the MCP tool definition for panda_log_analysis.
+
+    Returns:
+        Dict with name, description, inputSchema, examples, and tags.
+    """
+    return {
+        "name": "panda_log_analysis",
+        "description": (
+            "Download and analyse a PanDA job failure from BigPanDA. "
+            "Returns structured evidence including job metadata, error codes, "
+            "pilot log excerpt, and failure classification."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "integer",
+                    "description": "PanDA job ID (pandaid) to analyse.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Original user query (optional).",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional context (site, task ID, release, etc.).",
+                },
+            },
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+        "examples": [
+            {"job_id": 6837798305, "query": "Why did job 6837798305 fail?"},
+        ],
+        "tags": ["atlas", "panda", "bigpanda", "job", "log", "failure", "diagnosis"],
+    }
+
+
+def _classify_failure(job: dict[str, Any], log_text: str) -> str:
+    """Classify a job failure from job fields and log text.
+
+    Args:
+        job: The ``job`` dict from the BigPanDA response.
+        log_text: Pilot log text (may be empty).
+
+    Returns:
+        A short failure category string.
+    """
+    # Build a combined search string from key error fields + log text
+    search = " ".join([
+        str(job.get("taskbuffererrordiag") or ""),
+        str(job.get("piloterrordiag") or ""),
+        str(job.get("exeerrordiag") or ""),
+        str(job.get("jobsubstatus") or ""),
+        str(job.get("commandtopilot") or ""),
+        log_text,
+    ]).lower()
+
+    for category, keywords in _FAILURE_PATTERNS:
+        if any(kw in search for kw in keywords):
+            return category
+    return "unknown"
+
+
+def _parse_response(raw_text: str) -> tuple[dict[str, Any] | None, str]:
+    """Split the analyze response into a job dict and pilot log text.
+
+    The response format is::
+
+        === BIGPANDA JOB FAILURE ANALYSIS FOR JOB NNN ===
+        Job NNN metadata:
+        { ... json ... }
+        ===...===
+        <pilot log or error message>
+
+    Args:
+        raw_text: Raw text from the MCP server.
+
+    Returns:
+        Tuple of (job_dict_or_None, pilot_log_text).
+    """
+    json_start = raw_text.find("{")
+    if json_start < 0:
+        return None, raw_text
+
+    # Find the divider after the JSON block
+    parts = _DIVIDER_RE.split(raw_text[json_start:], maxsplit=1)
+    json_str = parts[0].strip()
+    pilot_log = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        data: dict[str, Any] = json.loads(json_str)
+        return data.get("job"), pilot_log
+    except json.JSONDecodeError:
+        return None, raw_text
 
 
 class PandaLogAnalysisTool:
-    """Dummy tool that analyzes a log snippet and returns a short summary.
+    """MCP tool for downloading and analysing PanDA job failure logs."""
 
-    The current implementation uses simple heuristics to classify the error and
-    suggest next steps. This is a placeholder for a richer pipeline that may
-    include log retrieval, parsing, and LLM-based summarization.
-    """
+    def __init__(self) -> None:
+        """Initialise with the tool definition."""
+        self._def: dict[str, Any] = get_definition()
 
-    @staticmethod
-    def get_definition() -> dict[str, Any]:
-        """Return the tool discovery definition.
-
-        The returned dictionary includes the tool name, description and an
-        input schema describing expected arguments for clients.
+    def get_definition(self) -> dict[str, Any]:
+        """Return the MCP tool definition.
 
         Returns:
-            Dict[str, Any]: MCP-compatible tool discovery definition.
+            Tool definition dictionary.
         """
-        return {
-            "name": "panda_log_analysis",
-            "description": "Analyze a job/task failure log snippet (dummy implementation).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "log_text": {"type": "string", "description": "Log text or snippet"},
-                    "context": {"type": "string", "description": "Optional context (site, task id, etc.)"},
-                },
-                "required": ["log_text"],
-            },
-        }
+        return self._def
 
-    async def call(self, arguments: dict[str, Any]) -> list[dict[str, Any]]:
-        """Analyze the provided log snippet and return a human-readable summary.
+    async def call(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Download logs and return structured failure analysis.
 
         Args:
-            arguments: Mapping with keys ``log_text`` (required) and optional
-                ``context`` providing additional metadata.
+            arguments: Dict with required ``job_id`` and optional
+                ``query`` and ``context``.
 
         Returns:
-            List[Dict[str, Any]]: A one-element text content list produced by
-            the ``text_content`` helper containing classification and advice.
+            Dict with ``evidence`` (structured analysis) and ``text``
+            (human-readable summary).
         """
-        log_text = arguments.get("log_text", "")
-        context = arguments.get("context", "")
-        # Toy heuristics
-        lower = log_text.lower()
-        if "timeout" in lower or "timed out" in lower:
-            classification = "Timeout"
-            advice = "Check walltime limits, network/storage slowness, or stuck payload."
-        elif "segmentation fault" in lower or "sigsegv" in lower:
-            classification = "Payload crash (SIGSEGV)"
-            advice = "Check software release, memory pressure, and reproducibility of the failing input."
-        elif "no space left" in lower:
-            classification = "Disk full"
-            advice = "Check scratch space quotas and local disk usage on the worker node."
-        else:
-            classification = "Unknown"
-            advice = "Collect more context (error code, pilot error diag, site, release) and re-run with debug."
+        if not isinstance(arguments, dict):
+            return {"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}
 
-        return text_content(
-            (
-                "Log analysis (dummy)\n"
-                f"- context: {context or '(none)'}\n"
-                f"- classification: {classification}\n"
-                f"- suggested next step: {advice}\n\n"
-                "First 300 chars of log:\n"
-            ) + log_text[:300]
+        job_id = arguments.get("job_id")
+        if job_id is None:
+            return {"evidence": {"error": "missing job_id", "provided": arguments}}
+
+        try:
+            job_id_int = int(job_id)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return {"evidence": {"error": "job_id must be an integer", "provided": arguments}}
+
+        context: str = str(arguments.get("context", "") or "")
+        monitor_url = f"https://bigpanda.cern.ch/job?pandaid={job_id_int}"
+        base_evidence: dict[str, Any] = {
+            "job_id": job_id_int,
+            "monitor_url": monitor_url,
+            "context": context or None,
+        }
+
+        caller = get_mcp_caller()
+        result = await caller.call(
+            server_name=_SERVER,
+            tool_name=_TOOL,
+            arguments={"panda_id": str(job_id_int)},
         )
+
+        if result["error"]:
+            base_evidence["error"] = result["error"]
+            return {
+                "evidence": base_evidence,
+                "text": f"Failed to analyse job {job_id_int}: {result['error']}",
+            }
+
+        raw_text: str = result["text"] or ""
+        job, pilot_log = _parse_response(raw_text)
+
+        if job is None:
+            base_evidence["not_found"] = True
+            base_evidence["raw"] = raw_text[:500]
+            return {
+                "evidence": base_evidence,
+                "text": (
+                    f"Could not retrieve analysis for job {job_id_int}. "
+                    "The job ID may not exist."
+                ),
+            }
+
+        classification = _classify_failure(job, pilot_log)
+        pilot_log_failed = "❌" in pilot_log or "failed" in pilot_log.lower()
+
+        evidence: dict[str, Any] = {
+            **base_evidence,
+            "failure_classification": classification,
+            "jobstatus": job.get("jobstatus"),
+            "jobsubstatus": job.get("jobsubstatus"),
+            "computingsite": job.get("computingsite"),
+            "cloud": job.get("cloud"),
+            "atlasrelease": job.get("atlasrelease"),
+            "jeditaskid": job.get("jeditaskid"),
+            "attemptnr": job.get("attemptnr"),
+            "maxattempt": job.get("maxattempt"),
+            "commandtopilot": job.get("commandtopilot"),
+            "piloterrorcode": job.get("piloterrorcode"),
+            "piloterrordiag": job.get("piloterrordiag"),
+            "exeerrorcode": job.get("exeerrorcode"),
+            "exeerrordiag": job.get("exeerrordiag"),
+            "taskbuffererrorcode": job.get("taskbuffererrorcode"),
+            "taskbuffererrordiag": job.get("taskbuffererrordiag"),
+            "ddmerrorcode": job.get("ddmerrorcode"),
+            "ddmerrordiag": job.get("ddmerrordiag"),
+            "starttime": job.get("starttime"),
+            "endtime": job.get("endtime"),
+            "duration": job.get("duration"),
+            "pilot_log_available": not pilot_log_failed,
+            "pilot_log_excerpt": pilot_log[:3000] if not pilot_log_failed else None,
+            "pilot_log_error": pilot_log if pilot_log_failed else None,
+        }
+
+        summary = (
+            f"Job {job_id_int} failure analysis complete. "
+            f"Classification: {classification}."
+        )
+        if job.get("taskbuffererrordiag"):
+            summary += f" Task buffer: {job['taskbuffererrordiag']}."
+        if job.get("piloterrordiag"):
+            summary += f" Pilot: {job['piloterrordiag']}."
+        return {"evidence": evidence, "text": summary}
 
 
 panda_log_analysis_tool = PandaLogAnalysisTool()
+
+__all__ = ["PandaLogAnalysisTool", "panda_log_analysis_tool", "get_definition"]

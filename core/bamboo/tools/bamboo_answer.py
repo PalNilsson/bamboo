@@ -20,11 +20,18 @@ from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, coerce_messages, text_content
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.task_status import panda_task_status_tool
+from bamboo.tools.job_status import panda_job_status_tool
+from bamboo.tools.log_analysis import panda_log_analysis_tool
 
-# Matches "task 123", "task:123", "task-123", "task/123", "task#123".
-# The word boundary + digit-length cap avoids matching accidental substrings
-# inside URLs or other numeric tokens.
+# Matches "task 123", "task:123", "task-123" etc. (4-12 digits)
 _TASK_PATTERN = re.compile(r"(?i)\btask[:#/\-\s]+([0-9]{4,12})\b")
+# Matches "job 123", "job:123", "pandaid 123", "panda id 123" etc.
+_JOB_PATTERN = re.compile(r"(?i)\b(?:job|pandaid|panda[\s_-]?id)[:#/\-\s]+([0-9]{4,12})\b")
+# Matches "analyse/analyze/why did ... job 123 fail"
+_LOG_PATTERN = re.compile(
+    r"(?i)(?:analys[ei]|why|fail|log|diagnos)[^.]{0,60}"
+    r"\bjob[:#/\-\s]+([0-9]{4,12})\b"
+)
 
 
 def _extract_task_id(text: str) -> int | None:
@@ -43,6 +50,36 @@ def _extract_task_id(text: str) -> int | None:
         return int(m.group(1))
     except ValueError:
         return None
+
+
+def _extract_job_id(text: str) -> int | None:
+    """Extract a job (PanDA) ID from text.
+
+    Args:
+        text: Input text.
+
+    Returns:
+        The extracted job ID, or None if not found.
+    """
+    m = _JOB_PATTERN.search(text or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def _is_log_analysis_request(text: str) -> bool:
+    """Return True if the question is asking for log/failure analysis.
+
+    Args:
+        text: User question text.
+
+    Returns:
+        True if analysis keywords are present alongside a job reference.
+    """
+    return bool(_LOG_PATTERN.search(text or ""))
 
 
 def _compact(obj: Any, limit: int = 6000) -> str:
@@ -221,26 +258,94 @@ class BambooAnswerTool:
             return text_content(body)
 
         task_id = _extract_task_id(question)
-        if task_id is None:
+        job_id = _extract_job_id(question)
+        want_log_analysis = _is_log_analysis_request(question)
+
+        # --- Job log analysis ---
+        if job_id and want_log_analysis:
+            tool_result = await panda_log_analysis_tool.call({
+                "job_id": job_id,
+                "query": question,
+                "context": "",
+            })
+            evidence = tool_result.get("evidence", tool_result)
+            system = (
+                "You are AskPanDA for the ATLAS experiment.\n"
+                "Given a user's question and a JSON evidence object containing PanDA job "
+                "log analysis, write a concise diagnostic answer.\n"
+                "Rules:\n"
+                "- State the failure classification clearly.\n"
+                "- Quote relevant log excerpts if present.\n"
+                "- Suggest concrete next steps based on the failure type.\n"
+                "- Include the BigPanDA monitor link.\n"
+                "- Keep it under ~10 bullet points.\n"
+            )
+            prompt_user = f"User question:\n{question}\n\nEvidence JSON:\n{_compact(evidence)}\n"
+            delegated = await bamboo_llm_answer_tool.call(
+                {"messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt_user},
+                ]}
+            )
+            body = str(delegated[0].get("text", "")) if delegated and isinstance(delegated[0], dict) else str(delegated)
+            return text_content(body)
+
+        # --- Job status ---
+        if job_id and not task_id:
+            tool_result = await panda_job_status_tool.call({
+                "job_id": job_id,
+                "query": question,
+            })
+            evidence = tool_result.get("evidence", tool_result)
+            is_error = _is_bigpanda_error(evidence)
+            raw_preview = _extract_raw_preview(tool_result, evidence) if is_error and include_raw else None
+            system = (
+                "You are AskPanDA for the ATLAS experiment.\n"
+                "Given a user's question and a JSON evidence object from BigPanDA, "
+                "write a concise, helpful answer about the job status.\n"
+                "Rules:\n"
+                "- If evidence.not_found is true: say the job was not found and suggest "
+                "checking the ID.\n"
+                "- Otherwise: summarise status, site, queue, pilot error, and timing.\n"
+                "- Always include the BigPanDA monitor link if present.\n"
+                "- Keep it under ~8 bullet points.\n"
+            )
+            prompt_user = f"User question:\n{question}\n\nEvidence JSON:\n{_compact(evidence)}\n"
+            if raw_preview:
+                system += "\nOn error, include the Raw response preview verbatim at the end inside a fenced code block.\n"
+                prompt_user += f"\nRaw response preview:\n{raw_preview}\n"
+            delegated = await bamboo_llm_answer_tool.call(
+                {"messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt_user},
+                ]}
+            )
+            body = str(delegated[0].get("text", "")) if delegated and isinstance(delegated[0], dict) else str(delegated)
+            if raw_preview and "Raw response preview" not in body:
+                body = f"{body.rstrip()}\n\nRaw response preview:\n```text\n{raw_preview}\n```\n"
+            return text_content(body)
+
+        # --- No recognised ID — forward directly to LLM ---
+        if not task_id:
             delegated = await bamboo_llm_answer_tool.call(
                 {"messages": messages} if messages else {"question": question}
             )
             body = str(delegated[0].get("text", "")) if delegated and isinstance(delegated[0], dict) else str(delegated)
             return text_content(body)
 
-        # Call task status tool — include_jobs and include_raw are separate concerns.
+        # --- Task status ---
         tool_args: dict[str, Any] = {
             "task_id": task_id,
             "query": question,
             "include_jobs": include_jobs,
         }
-        tool_result: dict[str, Any] = await panda_task_status_tool.call(tool_args)
-        evidence: dict[str, Any] = tool_result.get("evidence", tool_result)
+        tool_result = await panda_task_status_tool.call(tool_args)
+        evidence = tool_result.get("evidence", tool_result)
 
         is_error = _is_bigpanda_error(evidence)
         raw_preview = _extract_raw_preview(tool_result, evidence) if is_error and include_raw else None
 
-        system: str = (
+        system = (
             "You are AskPanDA for the ATLAS experiment.\n"
             "Given a user's question and a JSON evidence object from BigPanDA, write a concise, helpful answer.\n"
             "Rules:\n"
@@ -251,9 +356,7 @@ class BambooAnswerTool:
             "- Always include the BigPanDA monitor link if present.\n"
             "- Keep it under ~8 bullet points.\n"
         )
-
-        prompt_user: str = f"User question:\n{question}\n\nEvidence JSON:\n{_compact(evidence)}\n"
-
+        prompt_user = f"User question:\n{question}\n\nEvidence JSON:\n{_compact(evidence)}\n"
         if raw_preview:
             system += "\nOn error, include the Raw response preview verbatim at the end inside a fenced code block.\n"
             prompt_user += f"\nRaw response preview:\n{raw_preview}\n"
