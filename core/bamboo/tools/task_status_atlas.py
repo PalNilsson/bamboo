@@ -37,7 +37,6 @@ def get_definition() -> dict[str, Any]:
     Returns:
         Dict with name, description, inputSchema, examples, and tags.
     """
-
     return {
         "name": "panda_task_status",
         "description": (
@@ -65,6 +64,7 @@ def get_definition() -> dict[str, Any]:
 
 class PandaTaskStatusTool:
     """MCP tool for fetching PanDA task status and metadata from BigPanDA."""
+
     def __init__(self) -> None:
         """Initialise with the tool definition."""
         self._def: dict[str, Any] = get_definition()

@@ -26,7 +26,6 @@ def _text_content(text: str) -> list[dict[str, Any]]:
     Returns:
         One-element list compatible with the MCP content format.
     """
-
     return [{"type": "text", "text": text}]
 
 
@@ -53,6 +52,7 @@ def _load_banner_lines() -> Sequence[str]:
 @dataclass(frozen=True)
 class AtlasUiManifestTool:
     """Tool that returns UI metadata for ATLAS / AskPanDA."""
+
     @staticmethod
     def get_definition() -> dict[str, Any]:
         """Return MCP tool definition.
