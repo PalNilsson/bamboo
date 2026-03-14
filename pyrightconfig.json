@@ -10,7 +10,7 @@
     "packages/askpanda_epic",
     "packages/askpanda_verarubin"
   ],
-  "pythonVersion": "3.11",
+  "pythonVersion": "3.10",
   "typeCheckingMode": "basic",
   "executionEnvironments": [
     {

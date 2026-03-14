@@ -2,7 +2,7 @@
 name = "cgsim"
 version = "0.0.1"
 description = "CGSim plugin"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 
 [project.dependencies]
 requests = "*"

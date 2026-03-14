@@ -2,7 +2,7 @@
 name = "askpanda_epic"
 version = "0.0.1"
 description = "EPIC / EIC AskPanDA plugin (placeholder)"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
   "requests>=2.0",
 ]
