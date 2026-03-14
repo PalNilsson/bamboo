@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 try:
-    import tomllib
+    import tomllib  # type: ignore[import]
 except ImportError:  # Python < 3.11
     try:
         import tomli as tomllib  # type: ignore[no-redef]
