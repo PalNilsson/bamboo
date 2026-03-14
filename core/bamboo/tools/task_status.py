@@ -7,7 +7,7 @@ ATLAS-specific file holds the logic.
 """
 from __future__ import annotations
 
-from .task_status_atlas import (  # noqa: F401  (re-export)
+from bamboo.tools.task_status_atlas import (  # noqa: F401  (re-export)
     PandaTaskStatusTool,
     get_definition,
     panda_task_status_tool,

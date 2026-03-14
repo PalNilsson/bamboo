@@ -10,20 +10,7 @@
     "packages/askpanda_epic",
     "packages/askpanda_verarubin"
   ],
-  "pythonVersion": "3.10",
-  "typeCheckingMode": "basic",
-  "executionEnvironments": [
-    {
-      "root": "core",
-      "extraPaths": ["core"]
-    },
-    {
-      "root": "packages/askpanda_atlas",
-      "extraPaths": ["core", "packages/askpanda_atlas"]
-    },
-    {
-      "root": "tests",
-      "extraPaths": ["core", "packages/askpanda_atlas"]
-    }
-  ]
+  "pythonVersion": "3.11",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "basic"
 }

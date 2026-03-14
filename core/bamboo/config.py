@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-import tomllib
+try:
+    import tomllib
+except ImportError:  # Python < 3.11
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError:
+        tomllib = None  # type: ignore[assignment]
 from pathlib import Path
 
 
@@ -18,6 +24,8 @@ def load_askpanda_config() -> dict:
     Returns:
         Dictionary of configuration values under `tool.askpanda`, or an empty dict if the file does not exist.
     """
+    if tomllib is None:
+        return {}
     pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
     if not pyproject.exists():
         return {}

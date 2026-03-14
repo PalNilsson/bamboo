@@ -21,7 +21,7 @@ import asyncio
 import logging
 from typing import Any
 
-from ._panda_http import (
+from bamboo.tools._panda_http import (
     datasets_summary,
     fetch_jsonish,
     get_base_url,
