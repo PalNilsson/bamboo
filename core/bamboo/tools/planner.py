@@ -244,16 +244,16 @@ def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str,
         if not callable(get_def):
             return
         try:
-            d = dict(get_def())
+            d: dict[str, Any] = dict(get_def())
         except Exception:  # pylint: disable=broad-exception-caught
             return
-        name = d.get("name") or fallback_name
+        name: str = str(d.get("name") or fallback_name)
         if not name or name in seen:
             return
         seen.add(name)
         out.append({
             "name": name,
-            "description": d.get("description", ""),
+            "description": str(d.get("description", "")),
             "inputSchema": d.get("inputSchema", {}),
         })
 

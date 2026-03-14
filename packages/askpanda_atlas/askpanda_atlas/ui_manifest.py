@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from importlib import resources
-from typing import Any
+from typing import Any, Sequence
 
 
 def _text_content(text: str) -> list[dict[str, Any]]:
@@ -29,7 +29,7 @@ def _text_content(text: str) -> list[dict[str, Any]]:
     return [{"type": "text", "text": text}]
 
 
-def _load_banner_lines() -> list[str]:
+def _load_banner_lines() -> Sequence[str]:
     """Load ASCII banner lines from banner.txt shipped with this plugin."""
     try:
         pkg = __package__ or __name__.rpartition(".")[0]

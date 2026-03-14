@@ -6,7 +6,10 @@
   ],
   "extraPaths": [
     "core",
-    "packages/askpanda_atlas"
-  ]
+    "packages/askpanda_atlas",
+    "packages/askpanda_epic",
+    "packages/askpanda_verarubin"
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic"
 }
-

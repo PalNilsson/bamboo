@@ -207,7 +207,7 @@ class BambooAnswerTool:
         if not question and messages:
             for msg in reversed(messages):
                 if msg.get("role") == "user" and msg.get("content"):
-                    question = str(msg["content"]).strip()
+                    question = str(msg.get("content", "")).strip()
                     break
 
         if not question and not messages:

@@ -81,6 +81,7 @@ def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:
     Returns:
         A list of tool definition dicts compatible with the MCP server.
     """
+
     defs: list[dict[str, Any]] = []
     for ep in list_tool_entry_points():
         full_name = ep.get("name", "")
@@ -101,8 +102,8 @@ def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:
         if not callable(get_def):
             continue
         try:
-            d = dict(get_def())
-        except Exception:
+            d: dict[str, Any] = dict(get_def())
+        except Exception:  # pylint: disable=broad-exception-caught
             continue
 
         # Ensure tool name is the fully-qualified entry point name.
