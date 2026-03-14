@@ -65,12 +65,23 @@ FALLBACK_BANNER = r"""
 
 
 def _now() -> str:
-    """Return a short local timestamp for transcript headers."""
+    """Return a short local timestamp for transcript headers.
+
+    Returns:
+        str: Local time formatted as ``HH:MM:SS``.
+    """
     return time.strftime("%H:%M:%S")
 
 
 def _pretty(obj: Any) -> str:
-    """Pretty-print an object as JSON (best-effort)."""
+    """Serialize an object as pretty JSON when possible.
+
+    Args:
+        obj (Any): Value to serialize.
+
+    Returns:
+        str: JSON-formatted output, or ``str(obj)`` if serialization fails.
+    """
     try:
         return json.dumps(obj, indent=2, ensure_ascii=False)
     except Exception:
@@ -121,7 +132,14 @@ def _extract_text(result: Any) -> str:
 
 
 def _tool_names_from_list_tools(list_tools_result: Any) -> List[str]:
-    """Extract tool names from an MCP list_tools response."""
+    """Extract tool names from an MCP ``list_tools`` response.
+
+    Args:
+        list_tools_result (Any): Raw MCP SDK object or dict response.
+
+    Returns:
+        List[str]: Tool names discovered in the response.
+    """
     tools = getattr(list_tools_result, "tools", None)
     if isinstance(tools, list):
         names: List[str] = []
@@ -202,8 +220,8 @@ class BambooTui(App):
         """Initialize the app.
 
         Args:
-            cfg: MCP server config (stdio or HTTP).
-            plugin_id: Active plugin namespace (e.g. "atlas").
+            cfg (MCPServerConfig): MCP server config (stdio or HTTP).
+            plugin_id (str): Active plugin namespace (e.g. "atlas").
         """
         super().__init__()
         self.cfg = cfg
@@ -231,7 +249,11 @@ class BambooTui(App):
         self.input_widget: Optional[Input] = None
 
     def compose(self) -> ComposeResult:
-        """Compose Textual widgets."""
+        """Build the Textual widget tree.
+
+        Returns:
+            ComposeResult: Stream of widgets to render.
+        """
         yield Header(show_clock=True)
 
         with Container(id="root"):
@@ -319,7 +341,16 @@ class BambooTui(App):
                 pass
 
     async def _to_thread(self, func: Any, *args: Any, **kwargs: Any) -> Any:
-        """Run a blocking function in a thread."""
+        """Run a blocking callable in a worker thread.
+
+        Args:
+            func (Any): Callable to execute.
+            *args (Any): Positional arguments for ``func``.
+            **kwargs (Any): Keyword arguments for ``func``.
+
+        Returns:
+            Any: Value returned by ``func``.
+        """
         return await asyncio.to_thread(func, *args, **kwargs)
 
     async def _mcp_connect(self) -> None:
@@ -351,7 +382,7 @@ class BambooTui(App):
         return
 
     async def _mcp_close(self) -> None:
-        """Close the MCP client connection (best-effort)."""
+        """Close the MCP client connection using a best-effort strategy."""
         for name in ("close", "aclose", "stop", "shutdown", "release"):
             fn = getattr(self.mcp, name, None)
             if callable(fn):
@@ -364,7 +395,7 @@ class BambooTui(App):
             return
 
     def _render_banner_placeholder(self) -> None:
-        """Render a fallback banner before plugin manifest loads."""
+        """Render a fallback banner before plugin manifest data is loaded."""
         if not self.banner_widget:
             return
         banner_text = "\n".join(FALLBACK_BANNER)
@@ -378,10 +409,12 @@ class BambooTui(App):
             )
         )
 
-    def action_scroll_up(self):
+    def action_scroll_up(self) -> None:
+        """Scroll the transcript up by one page."""
         self.transcript.scroll_page_up()
 
-    def action_scroll_down(self):
+    def action_scroll_down(self) -> None:
+        """Scroll the transcript down by one page."""
         self.transcript.scroll_page_down()
 
     def action_focus_input(self) -> None:
@@ -396,7 +429,11 @@ class BambooTui(App):
         self._write_system("Transcript cleared.")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle Enter on the input field."""
+        """Handle Enter on the input field.
+
+        Args:
+            event (Input.Submitted): Submitted input event.
+        """
         text = (event.value or "").strip()
         if self.input_widget:
             self.input_widget.value = ""
@@ -478,7 +515,11 @@ class BambooTui(App):
         )
 
     async def _handle_question(self, question: str) -> None:
-        """Send a question to the answer tool and render the response."""
+        """Send a question to the answer tool and render the response.
+
+        Args:
+            question (str): User prompt text.
+        """
         self._write_user(question)
 
         if not self._mcp_ready:
@@ -511,7 +552,11 @@ class BambooTui(App):
             self._write_error(str(exc))
 
     async def _handle_command(self, cmdline: str) -> None:
-        """Handle slash commands."""
+        """Handle slash commands.
+
+        Args:
+            cmdline (str): Raw command line beginning with ``/``.
+        """
         parts = cmdline.strip().split()
         cmd = parts[0].lower()
         args = parts[1:]
@@ -584,7 +629,13 @@ class BambooTui(App):
         self._write_system(f"Unknown command: {cmdline} (try /help)")
 
     def _write_panel(self, renderable: Any, title: str, border_style: str = "dim") -> None:
-        """Write a panel to the transcript."""
+        """Write a panel to the transcript.
+
+        Args:
+            renderable (Any): Rich renderable content.
+            title (str): Panel title.
+            border_style (str): Rich border style name.
+        """
         if not self.transcript:
             return
 
@@ -614,7 +665,13 @@ class BambooTui(App):
             self.input_widget.focus()
 
     def _write_panel_old(self, renderable: Any, title: str, border_style: str = "dim") -> None:
-        """Write a panel to the transcript."""
+        """Write a panel using the legacy rendering path.
+
+        Args:
+            renderable (Any): Rich renderable content.
+            title (str): Panel title.
+            border_style (str): Rich border style name.
+        """
         if not self.transcript:
             return
         self.transcript.write(Panel(renderable, title=title, border_style=border_style))
@@ -629,23 +686,45 @@ class BambooTui(App):
         self.action_focus_input()
 
     def _write_system(self, msg: str) -> None:
-        """Write a system message."""
+        """Write a system message.
+
+        Args:
+            msg (str): Message text.
+        """
         self._write_panel(Text(msg), title=f"{_now()}  system", border_style="dim")
 
     def _write_user(self, msg: str) -> None:
-        """Write a user message."""
+        """Write a user message.
+
+        Args:
+            msg (str): Message text.
+        """
         self._write_panel(Text(msg), title=f"{_now()}  you", border_style="dim")
 
     def _write_assistant(self, msg: str) -> None:
-        """Write an assistant message."""
+        """Write an assistant message.
+
+        Args:
+            msg (str): Markdown message text.
+        """
         self._write_panel(Markdown(msg), title=f"{_now()}  AskPanDA", border_style="dim")
 
     def _write_error(self, msg: str) -> None:
-        """Write an error message."""
+        """Write an error message.
+
+        Args:
+            msg (str): Error message text.
+        """
         self._write_panel(Text(msg), title=f"{_now()}  error", border_style="red")
 
     def _write_tool(self, tool: str, args: Dict[str, Any], res: Any) -> None:
-        """Write a debug tool call block."""
+        """Write a debug tool call block.
+
+        Args:
+            tool (str): Tool name.
+            args (Dict[str, Any]): Tool input arguments.
+            res (Any): Raw tool result.
+        """
         body = (
             f"**tool:** `{tool}`\n\n"
             f"**args:**\n```json\n{_pretty(args)}\n```\n\n"
@@ -655,7 +734,7 @@ class BambooTui(App):
 
 
 def main() -> None:
-    """CLI entrypoint."""
+    """Parse CLI arguments and run the Textual chat app."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--transport", choices=["stdio", "http"], required=True)
     ap.add_argument("--http-url", default=os.getenv("MCP_URL", "http://localhost:8000/mcp"))
