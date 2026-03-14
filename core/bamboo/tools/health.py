@@ -44,12 +44,18 @@ class HealthTool:
         # arguments intentionally unused; keep parameter for MCP compatibility
         del arguments  # pragma: no cover - explicit ignore
 
+        # Instantiate Config() so env vars are read at call time, not import time.
+        try:
+            cfg: Config | type[Config] = Config()  # type: ignore[call-arg]
+        except TypeError:
+            cfg = Config  # type: ignore[assignment]
+
         return text_content(
             f"Bamboo MCP Server OK\n"
-            f"- name: {Config.SERVER_NAME}\n"
-            f"- version: {Config.SERVER_VERSION}\n"
-            f"- ENABLE_REAL_PANDA: {Config.ENABLE_REAL_PANDA}\n"
-            f"- ENABLE_REAL_LLM: {Config.ENABLE_REAL_LLM}"
+            f"- name: {cfg.SERVER_NAME}\n"
+            f"- version: {cfg.SERVER_VERSION}\n"
+            f"- ENABLE_REAL_PANDA: {cfg.ENABLE_REAL_PANDA}\n"
+            f"- ENABLE_REAL_LLM: {cfg.ENABLE_REAL_LLM}"
         )
 
 

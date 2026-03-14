@@ -3,10 +3,10 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "askpanda-mcp"
+name = "bamboo"
 version = "0.1.0"
-description = "AskPanDA implemented as an MCP server (skeleton)."
-requires-python = ">=3.10"
+description = "Bamboo — lightweight MCP-based runtime with a plugin architecture for AI-assisted scientific tools."
+requires-python = ">=3.11"
 dependencies = ["mcp>=0.9.0", "python-dotenv>=1.0.0"]
 
 [tool.setuptools]
@@ -19,5 +19,7 @@ include = ["bamboo*"]
 [tool.askpanda]
 default_namespace = "atlas"
 
-[project.entry-points."askpanda.tools"]
-"atlas.task_status" = "bamboo.tools.task_status_atlas:panda_task_status_tool"
+# Entry points for tools shipped with the root package (if any).
+# Plugin packages (e.g. packages/askpanda_atlas) register their own entry
+# points under bamboo.tools in their own pyproject.toml.
+# [project.entry-points."bamboo.tools"]

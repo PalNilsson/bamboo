@@ -68,17 +68,26 @@ def find_tool_by_name(tool_name: str, namespace: str | None = None) -> ResolvedT
     """Find and load a tool by name, optionally filtered by namespace.
 
     Searches for entry points matching the given tool name across primary and
-    legacy groups. If namespace is specified, only exact matches within that
-    namespace are returned.
+    legacy groups.
+
+    The ``tool_name`` argument should be the **unqualified** name (e.g.
+    ``"task_status"``).  If you pass a fully-qualified name like
+    ``"atlas.task_status"`` without setting ``namespace``, pass it as-is and
+    leave ``namespace`` as ``None``; the function will split it internally.
 
     Args:
-        tool_name: Name of the tool to find. Can include namespace prefix (e.g., 'ns.tool').
-        namespace: Optional namespace to restrict the search. Defaults to None.
+        tool_name: Name of the tool to find.  May include a namespace prefix
+            separated by a dot (e.g. ``'atlas.task_status'``).  If so, and
+            ``namespace`` is not set, the prefix is treated as the namespace.
+        namespace: Optional namespace to restrict the search.
 
     Returns:
-        ResolvedTool object containing the loaded tool and metadata, or None if not found.
+        ResolvedTool with the loaded tool object and metadata, or None if not found.
     """
-    wanted_suffix: str = f".{tool_name}" if tool_name and "." not in tool_name else tool_name
+    # If tool_name is fully qualified and no explicit namespace was given,
+    # split it so the match logic below works correctly.
+    if "." in tool_name and namespace is None:
+        namespace, tool_name = tool_name.split(".", 1)
 
     for group in (PRIMARY_GROUP, LEGACY_GROUP):
         for ep in _iter_entry_points([group]):
@@ -86,8 +95,11 @@ def find_tool_by_name(tool_name: str, namespace: str | None = None) -> ResolvedT
             if namespace:
                 if ep_name != f"{namespace}.{tool_name}":
                     continue
-            elif wanted_suffix and not ep_name.endswith(wanted_suffix):
-                continue
+            else:
+                # Unqualified search: match the suffix after the last dot.
+                suffix = ep_name.rsplit(".", 1)[-1] if "." in ep_name else ep_name
+                if suffix != tool_name:
+                    continue
 
             try:
                 obj: Any = ep.load()

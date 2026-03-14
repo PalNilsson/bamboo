@@ -224,43 +224,66 @@ def build_planner_user_prompt(
 def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str, Any]]:
     """Collect a compact tool catalog for the planner.
 
+    Includes both the statically-registered core TOOLS (from ``bamboo.core``)
+    and any tools discovered via Python entry points.  Core tools are always
+    included regardless of the ``namespaces`` filter so the LLM is aware of
+    the full built-in toolset.
+
     Args:
-        namespaces: Optional list of namespaces to include (e.g. ['atlas']). If
-            omitted, include all discovered entry points.
+        namespaces: Optional list of namespaces to include for *entry-point*
+            tools (e.g. ['atlas']). Core tools are always included.
 
     Returns:
         List[Dict[str, Any]]: Tool definitions suitable for prompt inclusion.
     """
+    seen: set[str] = set()
     out: list[dict[str, Any]] = []
+
+    def _add_tool_obj(obj: Any, fallback_name: str = "") -> None:
+        get_def = getattr(obj, "get_definition", None)
+        if not callable(get_def):
+            return
+        try:
+            d = dict(get_def())
+        except Exception:  # pylint: disable=broad-exception-caught
+            return
+        name = d.get("name") or fallback_name
+        if not name or name in seen:
+            return
+        seen.add(name)
+        out.append({
+            "name": name,
+            "description": d.get("description", ""),
+            "inputSchema": d.get("inputSchema", {}),
+        })
+
+    # 1) Statically-registered core tools — always included.
+    try:
+        from bamboo.core import TOOLS  # pylint: disable=import-outside-toplevel
+        for tool_name, tool_obj in TOOLS.items():
+            _add_tool_obj(tool_obj, fallback_name=tool_name)
+    except Exception:  # pylint: disable=broad-exception-caught
+        # core not yet importable during early bootstrap — skip gracefully.
+        pass
+
+    # 2) Plugin tools discovered via entry points.
     for ep in list_tool_entry_points():
         name = ep.get("name", "")
+        if not name:
+            continue
         if namespaces:
             ns = name.split(".", 1)[0] if "." in name else ""
             if ns not in namespaces:
                 continue
 
-        # Load tool object via loader resolution and call get_definition().
         if "." in name:
             ns, _, tool_name = name.partition(".")
             resolved = find_tool_by_name(tool_name, namespace=ns)
         else:
             resolved = find_tool_by_name(name)
-        if not resolved or not getattr(resolved.obj, "get_definition", None):
-            continue
+        if resolved:
+            _add_tool_obj(resolved.obj, fallback_name=name)
 
-        try:
-            d = resolved.obj.get_definition()  # type: ignore[attr-defined]
-        except Exception:  # pylint: disable=broad-exception-caught
-            continue
-
-        # Keep only the fields the planner needs.
-        out.append(
-            {
-                "name": d.get("name") or name,
-                "description": d.get("description", ""),
-                "inputSchema": d.get("inputSchema", {}),
-            }
-        )
     return out
 
 
