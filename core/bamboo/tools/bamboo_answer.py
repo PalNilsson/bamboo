@@ -36,6 +36,7 @@ def _extract_task_id(text: str) -> int | None:
     Returns:
         The extracted task ID, or None if no task ID is found.
     """
+
     m = _TASK_PATTERN.search(text or "")
     if not m:
         return None
@@ -65,6 +66,7 @@ def _is_bigpanda_error(evidence: Any) -> bool:
     Returns:
         True if the evidence indicates an error or not-found condition.
     """
+
     if not isinstance(evidence, dict):
         return False
     if evidence.get("not_found") is True:
@@ -97,6 +99,7 @@ def _extract_raw_preview(tool_result: Any, evidence: Any, limit: int = 2000) -> 
     Returns:
         Preview string or None if nothing useful was found.
     """
+
     candidates: list[str] = []
 
     def _add_from(d: Any) -> None:

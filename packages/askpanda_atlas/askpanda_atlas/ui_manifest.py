@@ -26,6 +26,7 @@ def _text_content(text: str) -> list[dict[str, Any]]:
     Returns:
         One-element list compatible with the MCP content format.
     """
+
     return [{"type": "text", "text": text}]
 
 
