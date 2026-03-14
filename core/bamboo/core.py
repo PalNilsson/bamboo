@@ -81,7 +81,6 @@ def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:
     Returns:
         A list of tool definition dicts compatible with the MCP server.
     """
-
     defs: list[dict[str, Any]] = []
     for ep in list_tool_entry_points():
         full_name = ep.get("name", "")
