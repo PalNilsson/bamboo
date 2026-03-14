@@ -21,7 +21,7 @@ import asyncio
 import logging
 from typing import Any
 
-from bamboo.tools._panda_http import (
+from ._panda_http import (
     datasets_summary,
     fetch_jsonish,
     get_base_url,
@@ -64,7 +64,6 @@ def get_definition() -> dict[str, Any]:
 
 class PandaTaskStatusTool:
     """MCP tool for fetching PanDA task status and metadata from BigPanDA."""
-
     def __init__(self) -> None:
         """Initialise with the tool definition."""
         self._def: dict[str, Any] = get_definition()

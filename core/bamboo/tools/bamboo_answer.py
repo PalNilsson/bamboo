@@ -130,7 +130,6 @@ def _extract_raw_preview(tool_result: Any, evidence: Any, limit: int = 2000) -> 
 
 class BambooAnswerTool:
     """MCP tool for answering questions about ATLAS tasks using LLM and task metadata."""
-
     @staticmethod
     def get_definition() -> dict[str, Any]:
         """Return the MCP tool definition for bamboo_answer.

@@ -23,7 +23,6 @@
 This module creates the MCP Server instance, registers tools/prompts, and
 initializes process-wide resources (LLM selection + client caching).
 """
-
 from __future__ import annotations
 
 import inspect

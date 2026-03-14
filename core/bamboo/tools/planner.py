@@ -16,7 +16,6 @@ tooling so that Bamboo can implement a hybrid strategy:
 Note:
   The planner only returns a plan. It does not execute tools.
 """
-
 from __future__ import annotations
 
 import json
@@ -34,7 +33,6 @@ from bamboo.tools.loader import list_tool_entry_points, find_tool_by_name
 
 class PlanRoute(str, Enum):
     """Routing decision returned by the planner."""
-
     FAST_PATH = "FAST_PATH"
     PLAN = "PLAN"
     RETRIEVE = "RETRIEVE"
@@ -42,7 +40,6 @@ class PlanRoute(str, Enum):
 
 class ToolCall(BaseModel):
     """A single tool invocation proposed by the planner."""
-
     tool: str = Field(
         ..., min_length=1, description="Tool name as used by Bamboo (e.g., 'panda_task_status' or 'atlas.task_status')."
     )
@@ -58,7 +55,6 @@ class ToolCall(BaseModel):
 
 class RetrievalQuery(BaseModel):
     """Optional retrieval hint (future-proof; DB/vector store may implement this)."""
-
     type: str = Field(
         ..., description="Retrieval method (e.g., 'exact', 'by_entity', 'embedding')."
     )
@@ -67,7 +63,6 @@ class RetrievalQuery(BaseModel):
 
 class ReusePolicy(BaseModel):
     """Policy hints about reusing past answers/evidence."""
-
     allow_final_answer_reuse: bool = Field(
         default=False,
         description="If true, a previously stored final answer may be returned without fresh tool calls (use carefully).",
@@ -84,7 +79,6 @@ class ReusePolicy(BaseModel):
 
 class Plan(BaseModel):
     """Top-level plan object returned by the planner."""
-
     route: PlanRoute = Field(..., description="How the executor should proceed: FAST_PATH, PLAN, or RETRIEVE.")
     confidence: float = Field(
         ..., ge=0.0, le=1.0, description="Planner confidence in [0, 1]."
@@ -306,7 +300,6 @@ def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str,
 
 class BambooPlannerTool:
     """LLM-backed planner that outputs a JSON plan."""
-
     @staticmethod
     def get_definition() -> dict[str, Any]:
         """Return the MCP tool discovery definition.
