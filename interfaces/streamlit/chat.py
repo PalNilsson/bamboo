@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import sys
+import traceback
 from dataclasses import dataclass
 from collections.abc import Sequence
 from typing import Any
@@ -98,6 +99,7 @@ _CHAT_CSS = textwrap.dedent(
 [data-testid="stChatInput"] input {
   border-color: rgba(128,128,128,0.35) !important;
 }
+
 [data-testid="stChatInput"] textarea:focus,
 [data-testid="stChatInput"] textarea:focus-visible,
 [data-testid="stChatInput"] input:focus,
@@ -108,7 +110,7 @@ _CHAT_CSS = textwrap.dedent(
     """
 )
 
-st.markdown(_CHAT_CSS, unsafe_allow_html=True)
+# CSS will be applied in main() after st.set_page_config()
 
 
 # -----------------------------
@@ -574,6 +576,9 @@ def main() -> None:
     """Prepare Main Streamlit entrypoint."""
     st.set_page_config(page_title="AskPanDA (MCP)", layout="wide")
 
+    # Apply CSS styles (must be done after set_page_config)
+    st.markdown(_CHAT_CSS, unsafe_allow_html=True)
+
     # Style tweaks: remove the red focus border on the chat input.
     st.title("AskPanDA (MCP-first)")
 
@@ -583,7 +588,9 @@ def main() -> None:
     try:
         mcp = _get_mcp_client(cfg)
     except Exception as e:  # pylint: disable=broad-exception-caught
+        error_details = traceback.format_exc()
         st.error(f"Failed to create MCP client: {e}")
+        st.error(f"Details:\n{error_details}")
         st.stop()
 
     # Show tools/prompts

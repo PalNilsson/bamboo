@@ -111,7 +111,7 @@ class Plan(BaseModel):
     def _check_semantics(self) -> "Plan":
         """Validate cross-field semantics."""
         if self.route in (PlanRoute.FAST_PATH, PlanRoute.PLAN) and not self.tool_calls:
-            raise ValueError("route FAST_PATH/PLAN requires at least one tool_call")
+            raise ValueError("route FAST_PATH/PLAN requires at least one tool_calls entry")
         if self.route == PlanRoute.RETRIEVE and self.retrieval_query is None and not self.tool_calls:
             raise ValueError("route RETRIEVE requires retrieval_query and/or tool_calls")
         return self

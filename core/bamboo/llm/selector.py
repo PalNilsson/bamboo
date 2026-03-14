@@ -25,7 +25,11 @@ class LLMSelector:
         """Select a ModelSpec for a task.
 
         Args:
-            task: High-level task category.
+            task: High-level task category used to pick the appropriate
+                profile (``"route"`` → fast, ``"log_analysis"``/``"rag_answer"``
+                → reasoning, everything else → default).
+            _tenant: Reserved for future per-tenant model routing. Currently
+                unused.
 
         Returns:
             ModelSpec for the chosen profile.

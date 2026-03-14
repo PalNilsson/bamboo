@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
+from typing import Any
 
 import requests
 
@@ -44,7 +45,7 @@ def _default_base_url() -> str:
         return "https://bigpanda.cern.ch"
 
 
-def _fetch_jsonish(url: str, timeout: int = 30) -> tuple[int, str, str, dict | None]:
+def _fetch_jsonish(url: str, timeout: int = 30) -> tuple[int, str, str, dict[str, Any] | None]:
     """Fetch a URL expected to return JSON, handling non-JSON responses robustly.
 
     Handles HTML, empty bodies, redirects, and HTTP errors gracefully without
@@ -84,7 +85,7 @@ def _fetch_jsonish(url: str, timeout: int = 30) -> tuple[int, str, str, dict | N
         return status, ctype, text, None
 
 
-def _job_counts_from_payload(payload: dict) -> dict[str, int]:
+def _job_counts_from_payload(payload: dict[str, Any]) -> dict[str, int]:
     """Extract and count job statuses from payload.
 
     Searches for jobs list in payload and counts occurrences of each job status.
@@ -113,7 +114,7 @@ def _job_counts_from_payload(payload: dict) -> dict[str, int]:
     return dict(Counter(statuses))
 
 
-def _datasets_summary(payload: dict) -> dict:
+def _datasets_summary(payload: dict[str, Any]) -> dict[str, Any]:
     """Summarize dataset status and file counts from payload.
 
     Processes datasets list to extract status counts, file statistics, and
@@ -184,7 +185,7 @@ def _datasets_summary(payload: dict) -> dict:
     }
 
 
-def get_definition() -> dict:
+def get_definition() -> dict[str, Any]:
     """Get the MCP tool definition for task status.
 
     Returns:
@@ -219,9 +220,9 @@ class _Tool:
 
     def __init__(self) -> None:
         """Initialize the tool with its definition."""
-        self._def: dict = get_definition()
+        self._def: dict[str, Any] = get_definition()
 
-    def get_definition(self) -> dict:
+    def get_definition(self) -> dict[str, Any]:
         """Get the MCP tool definition.
 
         Returns:
@@ -229,7 +230,7 @@ class _Tool:
         """
         return self._def
 
-    async def call(self, arguments: dict) -> dict:
+    async def call(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Fetch task status and return structured evidence.
 
         Args:

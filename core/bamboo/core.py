@@ -27,6 +27,7 @@ initializes process-wide resources (LLM selection + client caching).
 from __future__ import annotations
 
 import inspect
+import asyncio
 from typing import Any, cast
 
 from mcp.server import Server
@@ -51,6 +52,7 @@ from bamboo.tools.pilot_monitor import panda_pilot_status_tool
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.bamboo_answer import bamboo_answer_tool
 from bamboo.tools.planner import bamboo_plan_tool
+from bamboo.tools.loader import list_tool_entry_points, find_tool_by_name
 from bamboo.prompts.templates import (
     get_bamboo_system_prompt,
     get_failure_triage_prompt,
@@ -69,7 +71,48 @@ TOOLS = {
 }
 
 
-def create_server() -> Server:  # pylint: disable=too-complex
+def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:
+    """Load tool definitions from installed plugin entry points.
+
+    Bamboo supports a plugin architecture where tools can be provided via
+    Python entry points (group: ``bamboo.tools`` and legacy ``askpanda.tools``).
+    This helper discovers those tools and returns their MCP tool definitions.
+
+    Returns:
+        A list of tool definition dicts compatible with the MCP server.
+    """
+
+    defs: list[dict[str, Any]] = []
+    for ep in list_tool_entry_points():
+        full_name = ep.get("name", "")
+        if not full_name or full_name in TOOLS:
+            continue
+
+        # Entry point names are expected to be "<namespace>.<tool_name>".
+        if "." not in full_name:
+            continue
+        namespace, tool_name = full_name.split(".", 1)
+
+        resolved = find_tool_by_name(tool_name, namespace=namespace)
+        if resolved is None:
+            continue
+
+        obj = resolved.obj
+        get_def = getattr(obj, "get_definition", None)
+        if not callable(get_def):
+            continue
+        try:
+            d = dict(get_def())
+        except Exception:
+            continue
+
+        # Ensure tool name is the fully-qualified entry point name.
+        d["name"] = full_name
+        defs.append(d)
+    return defs
+
+
+def create_server() -> Server:  # pylint: disable=too-complex  # noqa: C901
     """Create and configure the MCP Server instance.
 
     This function wires up multi-LLM selection (model registry, selector, and
@@ -123,6 +166,8 @@ def create_server() -> Server:  # pylint: disable=too-complex
             list in the appropriate shape for the MCP server/client contract.
         """
         defs: list[dict[str, Any]] = [tool.get_definition() for tool in TOOLS.values()]
+        # Also include plugin-provided tools discovered via Python entry points.
+        defs.extend(_load_entrypoint_tool_definitions())
 
         # If Tool is a real class/model, return Tool objects.
         if inspect.isclass(Tool):
@@ -150,9 +195,31 @@ def create_server() -> Server:  # pylint: disable=too-complex
             ValueError: If the requested tool name is unknown.
         """
         tool: Any | None = TOOLS.get(name)
-        if not tool:
+        if tool is not None:
+            return await tool.call(arguments or {})
+
+        # Fallback: resolve tool from plugin entry points.
+        # Tool names are expected to be either:
+        #   - fully-qualified: "<namespace>.<tool_name>" (preferred)
+        #   - unqualified: "tool_name" (will match any namespace that ends with that suffix)
+        namespace: str | None = None
+        tool_name: str = name
+        if "." in name:
+            namespace, tool_name = name.split(".", 1)
+
+        resolved = find_tool_by_name(tool_name, namespace=namespace)
+        if resolved is None:
             raise ValueError(f"Unknown tool: {name}")
-        return await tool.call(arguments or {})
+
+        obj = resolved.obj
+        call_fn = getattr(obj, "call", None)
+        if not callable(call_fn):
+            raise ValueError(f"Resolved tool has no callable 'call': {name}")
+
+        if inspect.iscoroutinefunction(call_fn):
+            return await call_fn(arguments or {})
+        # Run sync tools in a thread.
+        return await asyncio.to_thread(call_fn, arguments or {})
 
     @app.list_prompts()
     async def list_prompts() -> Any:

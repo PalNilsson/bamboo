@@ -21,8 +21,12 @@ Compatible with MCP streamable HTTP client signature:
 from __future__ import annotations
 
 import asyncio
+import os
+import concurrent.futures
+import subprocess
 import sys
 import threading
+import time
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from typing import Any, Literal, TYPE_CHECKING
@@ -43,6 +47,30 @@ if TYPE_CHECKING:
 streamable_http_client: Any = None
 
 
+def _merge_stdio_env(stdio_env: dict[str, str] | None) -> dict[str, str] | None:
+    """Merge stdio env overrides over the parent process environment.
+
+    Inline Textual UIs are sensitive to stray output from child processes. While we
+    cannot fully control the stdio transport internals here, inheriting the parent
+    environment ensures expected config (LLM defaults, plugin selection, etc.) is
+    visible to the server process.
+
+    Args:
+        stdio_env: Optional environment overrides.
+
+    Returns:
+        A merged environment dict, or None if no env should be passed.
+    """
+    env = os.environ.copy()
+    if stdio_env:
+        env.update({str(k): str(v) for k, v in stdio_env.items()})
+    # Make Python child process unbuffered to reduce partial protocol writes.
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    # If the server supports file logging, encourage it to avoid writing to stdout.
+    env.setdefault("BAMBOO_LOG_TO_FILE", "1")
+    return env
+
+
 TransportType = Literal["stdio", "http"]
 
 
@@ -54,7 +82,7 @@ class MCPServerConfig:
         transport: "stdio" (spawn local server) or "http" (connect to HTTP endpoint).
         stdio_command: Executable for stdio server (typically sys.executable).
         stdio_args: Args for stdio server (e.g., ["-m", "bamboo.server"]).
-        stdio_env: Optional environment overrides for stdio server.
+        stdio_env: Optional environment overrides for stdio server (merged over parent env).
         http_url: Streamable HTTP endpoint URL (e.g., "http://localhost:8000/mcp").
         http_headers: Optional headers (auth, etc.) for HTTP transport.
         terminate_on_close: If True, sends DELETE to terminate session on close.
@@ -78,11 +106,12 @@ class MCPServerConfig:
 class MCPAsyncClient:
     """Async MCP client with stdio and HTTP transports."""
 
-    def __init__(self, cfg: MCPServerConfig):
+    def __init__(self, cfg: MCPServerConfig, *, connect_on_init: bool = True):
         """Initialize the async client.
 
         Args:
             cfg: Server connection configuration.
+            connect_on_init: If True, connect immediately. If False, connect lazily on first use.
         """
         self.cfg = cfg
         self._session: ClientSession | None = None
@@ -109,10 +138,29 @@ class MCPAsyncClient:
             params = StdioServerParameters(
                 command=self.cfg.stdio_command,
                 args=self.cfg.stdio_args,
-                env=self.cfg.stdio_env,
+                env=_merge_stdio_env(self.cfg.stdio_env),
             )
-            self._transport_cm = stdio_client(params)
-            read_stream, write_stream = await self._transport_cm.__aenter__()  # pylint: disable=unnecessary-dunder-call
+            try:
+                self._transport_cm = stdio_client(params)
+                read_stream, write_stream = await self._transport_cm.__aenter__()  # pylint: disable=unnecessary-dunder-call
+            except (BrokenPipeError, EOFError, subprocess.SubprocessError) as e:
+                raise RuntimeError(
+                    f"Failed to start MCP server subprocess. Is the MCP server running?\n"
+                    f"Command: {self.cfg.stdio_command}\n"
+                    f"Args: {self.cfg.stdio_args}\n"
+                    f"Try starting it manually:\n"
+                    f"  python -m bamboo.server\n"
+                    f"Original error: {e}"
+                ) from e
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                raise RuntimeError(
+                    f"Failed to connect to MCP server via stdio. Is the MCP server running?\n"
+                    f"Command: {self.cfg.stdio_command}\n"
+                    f"Args: {self.cfg.stdio_args}\n"
+                    f"Try starting it manually:\n"
+                    f"  python -m bamboo.server\n"
+                    f"Original error: {e}"
+                ) from e
 
         else:
             # Build HTTP client if headers are needed (auth, etc.)
@@ -206,24 +254,32 @@ class MCPClientSync:
     using `asyncio.run_coroutine_threadsafe`.
     """
 
-    def __init__(self, cfg: MCPServerConfig):
+    def __init__(self, cfg: MCPServerConfig, *, connect_on_init: bool = True):
         """Create and connect the MCP client synchronously.
 
         Args:
             cfg: Server connection configuration.
+            connect_on_init: If True, connect immediately. If False, connect lazily on first use.
 
         Raises:
             RuntimeError: If connection/initialization fails.
         """
         self.cfg = cfg
         self._client = MCPAsyncClient(cfg)
+        self._connected = False
+        self._connect_on_init = connect_on_init
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, name="mcp-client-loop", daemon=True)
         self._thread.start()
 
-        # Connect on the loop thread
-        self._run(self._client.connect())
+        # Give the event loop thread time to start
+        time.sleep(0.1)
+
+        # Optionally connect on the loop thread (e.g., Streamlit wants immediate readiness).
+        if self._connect_on_init:
+            self._run(self._client.connect())
+            self._connected = True
 
     def _run_loop(self) -> None:
         """Event loop thread target."""
@@ -240,20 +296,63 @@ class MCPClientSync:
             Result of the coroutine.
 
         Raises:
-            RuntimeError: If the coroutine fails.
+            RuntimeError: If the coroutine fails or times out.
         """
         # run_coroutine_threadsafe expects a coroutine; if a Future is passed
         # (unlikely in our usage), forward it as-is; otherwise use it directly.
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]
         try:
-            return fut.result()
-        except Exception as e:
+            # Wait up to 30 seconds for the result
+            return fut.result(timeout=30)
+        except (asyncio.CancelledError, concurrent.futures.CancelledError) as e:
+            raise RuntimeError(
+                f"MCP server is not running or failed to connect.\n"
+                f"Please start the MCP server before using Streamlit:\n"
+                f"  python -m bamboo.server\n"
+                f"Original error: {type(e).__name__}"
+            ) from e
+        except concurrent.futures.TimeoutError as e:
+            raise RuntimeError(
+                "MCP server connection timed out after 30 seconds.\n"
+                "Is the MCP server running and responding?\n"
+                "Try starting it:\n"
+                "  python -m bamboo.server"
+            ) from e
+        except ConnectionRefusedError as e:
+            raise RuntimeError(
+                f"Failed to connect to MCP server (connection refused).\n"
+                f"Ensure the server is running:\n"
+                f"  python -m bamboo.server\n"
+                f"Original error: {e}"
+            ) from e
+        except OSError as e:
+            if "Connection refused" in str(e) or "No such file or directory" in str(e):
+                raise RuntimeError(
+                    f"Cannot connect to MCP server. Make sure it's running:\n"
+                    f"  python -m bamboo.server\n"
+                    f"Original error: {e}"
+                ) from e
             raise RuntimeError(str(e)) from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to create MCP client: {type(e).__name__}: {e}\n"
+                f"Is the MCP server running?\n"
+                f"  python -m bamboo.server"
+            ) from e
+
+    def ensure_connected(self) -> None:
+        """Connect to the MCP server if not already connected."""
+        if self._connected:
+            return
+        self._run(self._client.connect())
+        self._connected = True
 
     def close(self) -> None:
         """Close the MCP session and stop the background loop."""
         try:
-            self._run(self._client.aclose())
+            if self._connected:
+                self._run(self._client.aclose())
+            self._connected = False
         finally:
             if self._loop.is_running():
                 self._loop.call_soon_threadsafe(self._loop.stop)
@@ -262,14 +361,17 @@ class MCPClientSync:
 
     def list_tools(self) -> Any:
         """List tools (sync)."""
+        self.ensure_connected()
         return self._run(self._client.list_tools())
 
     def list_prompts(self) -> Any:
         """List prompts (sync)."""
+        self.ensure_connected()
         return self._run(self._client.list_prompts())
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """Call tool (sync)."""
+        self.ensure_connected()
         return self._run(self._client.call_tool(name, arguments))
 
     @property

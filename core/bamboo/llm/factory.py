@@ -22,17 +22,16 @@ _PROVIDER_MAP: dict[str, type[LLMClient]] = {
 
 
 def build_client(model_spec: ModelSpec) -> LLMClient:
-    """
-    Build an LLM client for a given ModelSpec.
+    """Build an LLM client for a given ModelSpec.
 
     Args:
-        model_spec: Model configuration.
+        model_spec: Model configuration including provider and model identifiers.
 
     Returns:
-        LLMClient instance.
+        LLMClient instance for the specified provider.
 
     Raises:
-        LLMConfigError: If provider is unknown.
+        LLMConfigError: If the provider name in model_spec is not registered.
     """
     cls = _PROVIDER_MAP.get(model_spec.provider)
     if not cls:

@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 from bamboo.llm.base import LLMClient
 from bamboo.llm.exceptions import LLMConfigError, LLMProviderError, LLMTimeoutError
-from bamboo.llm.types import GenerateParams, LLMResponse, Message, TokenUsage
+from bamboo.llm.types import GenerateParams, LLMResponse, Message, ModelSpec, TokenUsage
 
 
 # Keep this small and configurable; mirrors the original AskPanDA approach.
@@ -22,7 +22,7 @@ class MistralLLMClient(LLMClient):
     Uses the official `mistralai` SDK with an async client and `chat.complete_async`.
     """
 
-    def __init__(self, model_spec) -> None:
+    def __init__(self, model_spec: ModelSpec) -> None:
         """Initialize the client with a model spec.
 
         Args:
@@ -71,7 +71,19 @@ class MistralLLMClient(LLMClient):
         return self._client
 
     def _normalize_messages(self, messages: Sequence[Message]) -> list[dict[str, str]]:
-        """Convert normalized messages into Mistral SDK chat message dicts."""
+        """Convert normalized messages into Mistral SDK chat message dicts.
+
+        Maps internal ``role`` values to Mistral-accepted roles
+        (system/user/assistant). Tool messages are folded into assistant content
+        with a ``[tool:<name>]`` prefix.
+
+        Args:
+            messages: Sequence of normalized Message dicts.
+
+        Returns:
+            List of dicts with 'role' and 'content' keys accepted by the
+            Mistral chat completion API.
+        """
         out: list[dict[str, str]] = []
         for m in messages:
             role = m.get("role", "user")

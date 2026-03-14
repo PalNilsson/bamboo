@@ -113,7 +113,7 @@ async def _shutdown() -> None:
     llm_manager = getattr(server, "llm_manager", None)
     if llm_manager is not None and hasattr(llm_manager, "close_all"):
         try:
-            await llm_manager.close_all()  # type: ignore[func-returns-value]
+            await llm_manager.close_all()
         except Exception:  # pylint: disable=broad-exception-caught
             # If closing fails, ignore - best-effort cleanup.
             pass

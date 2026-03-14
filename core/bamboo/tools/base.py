@@ -35,7 +35,15 @@ def coerce_messages(raw: Sequence[Any]) -> list[Message]:
     """Coerce raw message objects into a list of {role, content} dicts.
 
     This helper is shared by multiple tools to normalize incoming message
-    representations into the simple ``{{'role': str, 'content': str}}`` shape.
+    representations into the simple ``{'role': str, 'content': str}`` shape.
+    Items that are not dicts, or that have an empty content, are silently dropped.
+
+    Args:
+        raw: Sequence of raw message objects, each expected to be a dict with
+            'role' and 'content' keys.
+
+    Returns:
+        List of normalized Message dicts with string 'role' and 'content' values.
     """
     out: list[Message] = []
     for item in raw:
@@ -54,6 +62,10 @@ def text_content(text: str) -> list[MCPContent]:
 
     Args:
         text: Human-readable text to include in the response.
+
+    Returns:
+        A one-element list containing a dict with ``type="text"`` and the
+        provided text, compatible with the MCP content format.
     """
     return [{"type": "text", "text": text}]
 
