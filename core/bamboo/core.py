@@ -101,7 +101,10 @@ def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:
         if not callable(get_def):
             continue
         try:
-            d: dict[str, Any] = dict(get_def())
+            raw = get_def()
+            if not isinstance(raw, dict):
+                continue
+            d: dict[str, Any] = cast(dict[str, Any], raw)
         except Exception:  # pylint: disable=broad-exception-caught
             continue
 

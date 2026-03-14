@@ -11,5 +11,19 @@
     "packages/askpanda_verarubin"
   ],
   "pythonVersion": "3.11",
-  "typeCheckingMode": "basic"
+  "typeCheckingMode": "basic",
+  "executionEnvironments": [
+    {
+      "root": "core",
+      "extraPaths": ["core"]
+    },
+    {
+      "root": "packages/askpanda_atlas",
+      "extraPaths": ["core", "packages/askpanda_atlas"]
+    },
+    {
+      "root": "tests",
+      "extraPaths": ["core", "packages/askpanda_atlas"]
+    }
+  ]
 }

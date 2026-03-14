@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import re
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -221,6 +221,37 @@ def build_planner_user_prompt(
     )
 
 
+def _tool_def_from_obj(obj: Any, fallback_name: str = "") -> dict[str, Any] | None:
+    """Return a compact tool definition dict from a tool object, or None.
+
+    Args:
+        obj: Tool object expected to have a ``get_definition`` method.
+        fallback_name: Name to use if the definition doesn't include one.
+
+    Returns:
+        Dict with ``name``, ``description``, and ``inputSchema`` keys, or None
+        if the object has no usable definition.
+    """
+    get_def = getattr(obj, "get_definition", None)
+    if not callable(get_def):
+        return None
+    try:
+        raw = get_def()
+        if not isinstance(raw, dict):
+            return None
+        d: dict[str, Any] = cast(dict[str, Any], raw)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+    name: str = str(d.get("name") or fallback_name)
+    if not name:
+        return None
+    return {
+        "name": name,
+        "description": str(d.get("description", "")),
+        "inputSchema": d.get("inputSchema", {}),
+    }
+
+
 def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str, Any]]:
     """Collect a compact tool catalog for the planner.
 
@@ -239,31 +270,18 @@ def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str,
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
 
-    def _add_tool_obj(obj: Any, fallback_name: str = "") -> None:
-        get_def = getattr(obj, "get_definition", None)
-        if not callable(get_def):
-            return
-        try:
-            d: dict[str, Any] = dict(get_def())
-        except Exception:  # pylint: disable=broad-exception-caught
-            return
-        name: str = str(d.get("name") or fallback_name)
-        if not name or name in seen:
-            return
-        seen.add(name)
-        out.append({
-            "name": name,
-            "description": str(d.get("description", "")),
-            "inputSchema": d.get("inputSchema", {}),
-        })
+    def _add(obj: Any, fallback_name: str = "") -> None:
+        entry = _tool_def_from_obj(obj, fallback_name)
+        if entry and entry["name"] not in seen:
+            seen.add(entry["name"])
+            out.append(entry)
 
     # 1) Statically-registered core tools — always included.
     try:
         from bamboo.core import TOOLS  # pylint: disable=import-outside-toplevel
         for tool_name, tool_obj in TOOLS.items():
-            _add_tool_obj(tool_obj, fallback_name=tool_name)
+            _add(tool_obj, fallback_name=tool_name)
     except Exception:  # pylint: disable=broad-exception-caught
-        # core not yet importable during early bootstrap — skip gracefully.
         pass
 
     # 2) Plugin tools discovered via entry points.
@@ -275,14 +293,13 @@ def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str,
             ns = name.split(".", 1)[0] if "." in name else ""
             if ns not in namespaces:
                 continue
-
         if "." in name:
             ns, _, tool_name = name.partition(".")
             resolved = find_tool_by_name(tool_name, namespace=ns)
         else:
             resolved = find_tool_by_name(name)
         if resolved:
-            _add_tool_obj(resolved.obj, fallback_name=name)
+            _add(resolved.obj, fallback_name=name)
 
     return out
 
