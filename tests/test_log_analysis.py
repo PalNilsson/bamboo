@@ -36,11 +36,19 @@ SAMPLE_RESPONSE = (
     "❌ Pilot log download failed: Error downloading pilot log for job 6837798305 (exit code: 2)"
 )
 
+_SAMPLE_JOB_WITH_LOG = {
+    **SAMPLE_JOB,
+    "pandaid": 1234,
+    "jobsubstatus": "failed",
+    "taskbuffererrordiag": "",
+    "commandtopilot": "",
+    "piloterrordiag": "Segmentation fault",
+}
+_JSON_BLOCK_WITH_LOG = json.dumps({"job": _SAMPLE_JOB_WITH_LOG, "files": [], "dsfiles": []})
+
 SAMPLE_RESPONSE_WITH_LOG = (
     "=== BIGPANDA JOB FAILURE ANALYSIS FOR JOB 1234 ===\n\n"
-    f"Job 1234 metadata:\n\n{json.dumps({'job': {**SAMPLE_JOB, 'pandaid': 1234, 'jobsubstatus': 'failed',
-                                                 'taskbuffererrordiag': '', 'commandtopilot': '', 'piloterrordiag': 'Segmentation fault'},
-                                         'files': [], 'dsfiles': []})}\n\n"
+    f"Job 1234 metadata:\n\n{_JSON_BLOCK_WITH_LOG}\n\n"
     "============================================================\n\n"
     "pilot log content here: Segmentation fault in AthenaMP"
 )
