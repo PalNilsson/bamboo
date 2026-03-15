@@ -46,8 +46,8 @@ from bamboo.tools.health import bamboo_health_tool
 from bamboo.tools.doc_rag import panda_doc_search_tool
 from bamboo.tools.queue_info import panda_queue_info_tool
 from bamboo.tools.task_status import panda_task_status_tool
-from bamboo.tools.job_status import panda_job_status_tool
-from bamboo.tools.log_analysis import panda_log_analysis_tool
+from bamboo.tools.job_status import panda_job_status_tool  # type: ignore[import-untyped]
+from bamboo.tools.log_analysis import panda_log_analysis_tool  # type: ignore[import-untyped]
 from bamboo.tools.pilot_monitor import panda_pilot_status_tool
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.bamboo_answer import bamboo_answer_tool

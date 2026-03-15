@@ -20,8 +20,8 @@ from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, coerce_messages, text_content
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.task_status import panda_task_status_tool
-from bamboo.tools.job_status import panda_job_status_tool
-from bamboo.tools.log_analysis import panda_log_analysis_tool
+from bamboo.tools.job_status import panda_job_status_tool  # type: ignore[import-untyped]
+from bamboo.tools.log_analysis import panda_log_analysis_tool  # type: ignore[import-untyped]
 
 # Matches "task 123", "task:123", "task-123" etc. (4-12 digits)
 _TASK_PATTERN = re.compile(r"(?i)\btask[:#/\-\s]+([0-9]{4,12})\b")

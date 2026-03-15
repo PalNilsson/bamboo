@@ -16,7 +16,7 @@ import logging
 import re
 from typing import Any
 
-from bamboo.tools._mcp_caller import get_mcp_caller
+from bamboo.tools._mcp_caller import get_mcp_caller  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 
