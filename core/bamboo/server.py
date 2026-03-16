@@ -12,6 +12,9 @@ from __future__ import annotations
 import asyncio
 import sys
 
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup  # noqa: F401  (backport)
+
 from anyio import BrokenResourceError
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
