@@ -12,15 +12,14 @@ from __future__ import annotations
 import asyncio
 import sys
 
-if sys.version_info < (3, 11):
-    from exceptiongroup import BaseExceptionGroup  # noqa: F401  (backport)
-
 from anyio import BrokenResourceError
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from bamboo.config import Config
 from bamboo.core import create_server
+
+_SHUTDOWN_TYPES = (KeyboardInterrupt, asyncio.CancelledError, BrokenResourceError)
 
 
 def _is_shutdown_exception(exc: BaseException) -> bool:
@@ -31,6 +30,10 @@ def _is_shutdown_exception(exc: BaseException) -> bool:
     the stdio streams are torn down mid-read). Both are expected on shutdown
     and should be swallowed silently.
 
+    Avoids importing ``BaseExceptionGroup`` directly so the code works on
+    Python 3.10 without the ``exceptiongroup`` backport and satisfies pyright
+    on all supported versions.
+
     Args:
         exc: The exception to inspect.
 
@@ -38,10 +41,13 @@ def _is_shutdown_exception(exc: BaseException) -> bool:
         True if the exception (or all of its children, in the case of an
         ``ExceptionGroup``) represents a normal shutdown signal.
     """
-    if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError, BrokenResourceError)):
+    if isinstance(exc, _SHUTDOWN_TYPES):
         return True
-    if isinstance(exc, BaseExceptionGroup):
-        return all(_is_shutdown_exception(e) for e in exc.exceptions)
+    # BaseExceptionGroup is a builtin on 3.11+; check by type name to avoid
+    # a conditional import that confuses pyright on older targets.
+    if type(exc).__name__ in ("ExceptionGroup", "BaseExceptionGroup"):
+        exceptions = getattr(exc, "exceptions", ())
+        return all(_is_shutdown_exception(e) for e in exceptions)
     return False
 
 
