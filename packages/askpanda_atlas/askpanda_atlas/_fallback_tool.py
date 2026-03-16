@@ -141,8 +141,30 @@ class FallbackTaskStatusTool:
         content_type: str,
         text: str,
     ) -> dict[str, Any]:
-        """Build a structured error response for non-JSON / HTTP-error replies."""
+        """Build a structured error response for non-JSON / HTTP-error replies.
+
+        Args:
+            task_id_int: Numeric task ID.
+            monitor_url: Human-facing BigPanDA monitor URL.
+            json_url: The JSON API URL that was fetched.
+            http_status: HTTP status code received.
+            content_type: Content-Type header value.
+            text: Raw response body text.
+
+        Returns:
+            Dict with ``evidence`` and ``text`` keys.
+        """
         snippet = (text or "").strip().replace("\n", " ")[:400]
+        # BigPanDA returns HTTP 200 with an HTML page for unknown tasks
+        # rather than a 404, so detect the not-found condition from the body.
+        snippet_lower = snippet.lower()
+        html_not_found = (
+            "text/html" in content_type and
+            any(marker in snippet_lower for marker in (
+                "not found", "does not exist", "no such task",
+                "task not found", "unknown task",
+            ))
+        )
         evidence: dict[str, Any] = {
             "task_id": task_id_int,
             "monitor_url": monitor_url,
@@ -151,9 +173,9 @@ class FallbackTaskStatusTool:
             "content_type": content_type,
             "response_snippet": snippet,
         }
-        if http_status == 404:
+        if http_status == 404 or html_not_found:
             evidence["not_found"] = True
-            msg = f"Task {task_id_int} was not found in BigPanDA (HTTP 404)."
+            msg = f"Task {task_id_int} was not found in BigPanDA."
         elif http_status >= 400:
             msg = f"BigPanDA returned HTTP {http_status} for task {task_id_int}."
         else:

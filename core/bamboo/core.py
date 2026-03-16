@@ -82,9 +82,26 @@ def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:
     Returns:
         A list of tool definition dicts compatible with the MCP server.
     """
+    # Build the set of MCP tool names already covered by the built-in TOOLS
+    # dict so we can skip entry-point tools that would produce duplicates.
+    # TOOLS keys are internal identifiers (e.g. "panda_task_status"); the MCP
+    # name exposed to clients comes from get_definition()["name"] and may differ
+    # (e.g. the entry-point "atlas.task_status" resolves to the same singleton).
+    covered_mcp_names: set[str] = set()
+    for tool in TOOLS.values():
+        get_def_fn = getattr(tool, "get_definition", None)
+        if callable(get_def_fn):
+            try:
+                defn = get_def_fn()
+                if isinstance(defn, dict) and defn.get("name"):
+                    covered_mcp_names.add(str(defn["name"]))
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
     defs: list[dict[str, Any]] = []
     for ep in list_tool_entry_points():
         full_name = ep.get("name", "")
+        # Skip if the entry-point key itself matches a built-in TOOLS key.
         if not full_name or full_name in TOOLS:
             continue
 
@@ -107,6 +124,12 @@ def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:
                 continue
             d: dict[str, Any] = cast(dict[str, Any], raw)
         except Exception:  # pylint: disable=broad-exception-caught
+            continue
+
+        # Skip if this entry point resolves to the same MCP tool name as one
+        # already registered in TOOLS (avoids listing e.g. atlas.task_status
+        # twice when panda_task_status is already in the built-in dict).
+        if d.get("name", "") in covered_mcp_names:
             continue
 
         # Ensure tool name is the fully-qualified entry point name.

@@ -1,1 +1,4 @@
-mistralai
+# The real Mistral AI SDK. Versions 2.x on PyPI are a squatter package
+# (contains only Azure/GCP subclients, no top-level Mistral class).
+# Pin below 2.0 until the naming situation is resolved upstream.
+mistralai>=1.0,<2.0

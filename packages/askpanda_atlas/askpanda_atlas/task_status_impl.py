@@ -135,6 +135,16 @@ class PandaTaskStatusTool:
             snippet = (text or "").strip().replace("\n", " ")
             if len(snippet) > 400:
                 snippet = snippet[:400] + "…"
+            # BigPanDA returns HTTP 200 with an HTML page for unknown tasks
+            # rather than a 404, so detect the not-found condition from the body.
+            snippet_lower = snippet.lower()
+            html_not_found = (
+                "text/html" in content_type and
+                any(marker in snippet_lower for marker in (
+                    "not found", "does not exist", "no such task",
+                    "task not found", "unknown task",
+                ))
+            )
             evidence: dict[str, Any] = {
                 "task_id": task_id_int,
                 "monitor_url": monitor_url,
@@ -143,9 +153,9 @@ class PandaTaskStatusTool:
                 "content_type": content_type,
                 "response_snippet": snippet,
             }
-            if http_status == 404:
+            if http_status == 404 or html_not_found:
                 evidence["not_found"] = True
-                msg = f"Task {task_id_int} was not found in BigPanDA (HTTP 404)."
+                msg = f"Task {task_id_int} was not found in BigPanDA."
             elif http_status >= 400:
                 msg = f"BigPanDA returned HTTP {http_status} when fetching task {task_id_int}."
             else:

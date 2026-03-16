@@ -204,6 +204,16 @@ class BambooTui(App):
         height: 3;
     }
 
+    #thinking {
+        height: auto;
+        padding: 0 2;
+        display: none;
+    }
+
+    #thinking.active {
+        display: block;
+    }
+
     """
 
     BINDINGS = [
@@ -211,9 +221,12 @@ class BambooTui(App):
         Binding("ctrl+l", "clear", "Clear", show=True),
         Binding("ctrl+d", "quit", "Quit", show=False),
         Binding("ctrl+q", "quit", "Quit", show=True),
-        Binding("pageup", "scroll_up", show=False),
-        Binding("pagedown", "scroll_down", show=False),
-
+        Binding("pageup", "scroll_up", "Scroll up", show=True),
+        Binding("pagedown", "scroll_down", "Scroll down", show=True),
+        Binding("shift+pageup", "scroll_up", "Scroll up", show=False),
+        Binding("shift+pagedown", "scroll_down", "Scroll down", show=False),
+        Binding("ctrl+home", "scroll_home", "Scroll to top", show=False),
+        Binding("ctrl+end", "scroll_end_action", "Scroll to bottom", show=False),
     ]
 
     def __init__(self, cfg: MCPServerConfig, plugin_id: str) -> None:
@@ -246,6 +259,7 @@ class BambooTui(App):
 
         self.banner_widget: Optional[Static] = None
         self.transcript: Optional[RichLog] = None
+        self.thinking_widget: Optional[Static] = None
         self.input_widget: Optional[Input] = None
 
     def compose(self) -> ComposeResult:
@@ -264,6 +278,9 @@ class BambooTui(App):
             self.transcript = RichLog(id="transcript", wrap=True, markup=False)
             yield self.transcript
 
+            self.thinking_widget = Static("", id="thinking")
+            yield self.thinking_widget
+
             with Container(id="input_row"):
                 self.input_widget = Input(
                     id="input",
@@ -280,16 +297,17 @@ class BambooTui(App):
         if self.transcript:
             self.transcript.can_focus = False
 
-        # Best-effort mouse disable (some terminals inject control sequences).
+        self._render_banner_placeholder()
+        self._write_system("Starting… initializing MCP…")
+
+        # Disable mouse capture so the terminal can handle text selection normally.
+        # Trackpad scrolling is handled via PageUp/PageDown bindings instead.
         try:
             driver = getattr(self, "_driver", None)
             if driver and hasattr(driver, "disable_mouse_support"):
                 driver.disable_mouse_support()
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
-
-        self._render_banner_placeholder()
-        self._write_system("Starting… initializing MCP…")
 
         # IMPORTANT: no awaits here; let Textual finish initial render.
         self._mcp_task = asyncio.create_task(self._mcp_main(), name="bamboo.mcp_main")
@@ -411,11 +429,23 @@ class BambooTui(App):
 
     def action_scroll_up(self) -> None:
         """Scroll the transcript up by one page."""
-        self.transcript.scroll_page_up()
+        if self.transcript:
+            self.transcript.scroll_page_up(animate=False)
 
     def action_scroll_down(self) -> None:
         """Scroll the transcript down by one page."""
-        self.transcript.scroll_page_down()
+        if self.transcript:
+            self.transcript.scroll_page_down(animate=False)
+
+    def action_scroll_home(self) -> None:
+        """Scroll the transcript to the top."""
+        if self.transcript:
+            self.transcript.scroll_home(animate=False)
+
+    def action_scroll_end_action(self) -> None:
+        """Scroll the transcript to the bottom."""
+        if self.transcript:
+            self.transcript.scroll_end(animate=False)
 
     def action_focus_input(self) -> None:
         """Focus the input widget."""
@@ -517,6 +547,9 @@ class BambooTui(App):
     async def _handle_question(self, question: str) -> None:
         """Send a question to the answer tool and render the response.
 
+        Displays a "thinking" indicator while the server processes the request,
+        then replaces it with the assistant response on completion.
+
         Args:
             question (str): User prompt text.
         """
@@ -530,7 +563,10 @@ class BambooTui(App):
             self._write_error("No answer tool found. Try /tools to inspect server tools.")
             return
 
-        args: Dict[str, Any] = {"question": question}
+        args: Dict[str, Any] = {
+            "question": question,
+            "include_raw": self.debug_mode,
+        }
 
         provider = args.get("provider") or os.getenv("LLM_DEFAULT_PROVIDER") or "mistral"
         model = args.get("model") or os.getenv("LLM_DEFAULT_MODEL") or "..."
@@ -541,14 +577,16 @@ class BambooTui(App):
             args["model"] = model
             args["llm_model"] = model
 
+        thinking: bool = self._write_thinking()
         try:
             res = await self._to_thread(self.mcp.call_tool, self.answer_tool, args)
             if self.debug_mode:
                 self._write_tool(self.answer_tool, args, res)
 
             out = _extract_text(res) or "*(No text output; enable /debug on to see raw result.)*"
-            self._write_assistant(out)
+            self._replace_thinking(thinking, out)
         except Exception as exc:
+            self._replace_thinking(thinking, None)
             self._write_error(str(exc))
 
     async def _handle_command(self, cmdline: str) -> None:
@@ -580,7 +618,8 @@ class BambooTui(App):
                 "  /clear                Clear transcript\n"
                 "  /exit, /quit          Exit the app\n"
                 "\n"
-                "Tip: This TUI runs inline by default so you can mouse-select/copy text.\n"
+                "Tip: Use PageUp/PageDown to scroll. To copy text, hold Option (macOS) or\n"
+                "     Shift (Linux/Windows) while selecting with the mouse.\n"
                 "Use --no-inline to use the alternate screen."
             )
             return
@@ -684,6 +723,44 @@ class BambooTui(App):
             self.input_widget.focus()
 
         self.action_focus_input()
+
+    def _write_thinking(self) -> bool:
+        """Show the thinking indicator below the transcript.
+
+        Uses a dedicated #thinking Static widget that is toggled via a
+        CSS class rather than writing into the RichLog (which only accepts
+        Rich renderables, not Textual widgets).
+
+        Returns:
+            True if the indicator was shown, False if unavailable.
+        """
+        if not self.thinking_widget:
+            return False
+        self.thinking_widget.update(
+            Panel(
+                Text("Thinking…", style="dim italic"),
+                title=f"{_now()}  AskPanDA",
+                border_style="dim",
+                padding=(0, 1),
+            )
+        )
+        self.thinking_widget.add_class("active")
+        return True
+
+    def _replace_thinking(self, indicator: bool, answer: Optional[str]) -> None:
+        """Hide the thinking indicator and optionally write the final answer.
+
+        Args:
+            indicator: Value returned by _write_thinking (unused beyond
+                being a signal that the indicator was shown).
+            answer: The assistant response text (Markdown), or None to
+                simply hide the indicator without writing a response.
+        """
+        if self.thinking_widget:
+            self.thinking_widget.remove_class("active")
+            self.thinking_widget.update("")
+        if answer is not None:
+            self._write_assistant(answer)
 
     def _write_system(self, msg: str) -> None:
         """Write a system message.

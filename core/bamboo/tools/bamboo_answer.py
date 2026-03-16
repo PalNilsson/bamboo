@@ -307,7 +307,7 @@ class BambooAnswerTool:
                 "- If evidence.not_found is true: say the job was not found and suggest "
                 "checking the ID.\n"
                 "- Otherwise: summarise status, site, queue, pilot error, and timing.\n"
-                "- Always include the BigPanDA monitor link if present.\n"
+                "- Always include the BigPanDA monitor URL as plain text (not a Markdown hyperlink), e.g.: Monitor: https://bigpanda.cern.ch/job/12345/\n"
                 "- Keep it under ~8 bullet points.\n"
             )
             prompt_user = f"User question:\n{question}\n\nEvidence JSON:\n{_compact(evidence)}\n"
@@ -343,34 +343,43 @@ class BambooAnswerTool:
         evidence = tool_result.get("evidence", tool_result)
 
         is_error = _is_bigpanda_error(evidence)
-        raw_preview = _extract_raw_preview(tool_result, evidence) if is_error and include_raw else None
+        # Always extract the raw preview on errors so the LLM sees what BigPanDA
+        # actually returned — useful both for not-found detection and debugging.
+        # The include_raw flag additionally appends it verbatim to the user-facing
+        # response as a fenced code block.
+        raw_preview = _extract_raw_preview(tool_result, evidence) if is_error else None
 
         system = (
             "You are AskPanDA for the ATLAS experiment.\n"
             "Given a user's question and a JSON evidence object from BigPanDA, write a concise, helpful answer.\n"
             "Rules:\n"
-            "- If evidence.not_found is true or evidence.http_status==404: say the task was not found and suggest checking the ID.\n"
-            "- If evidence indicates non-JSON/HTTP error: explain BigPanDA returned an error and include monitor_url.\n"
+            "- If evidence.not_found is true or evidence.http_status==404: clearly state that the task ID was\n"
+            "  not found in BigPanDA. Do NOT say 'BigPanDA returned an error' — say the task does not exist\n"
+            "  or the ID is incorrect. Suggest the user double-check the task ID. Do not include a monitor link.\n"
+            "- If evidence indicates a non-JSON or other HTTP error (but not 404): explain that BigPanDA\n"
+            "  returned an unexpected response and include the monitor_url so the user can check manually.\n"
             "- Otherwise: summarise status, task name, owner, start/end times, dsinfo and dataset failures if present.\n"
             "- If job_counts is empty but datasets_summary exists, still describe datasets_summary.\n"
-            "- Always include the BigPanDA monitor link if present.\n"
+            "- Always include the BigPanDA monitor URL as plain text (not a Markdown hyperlink)\n"
+            "  in non-error cases, e.g.: Monitor: https://bigpanda.cern.ch/task/12345/\n"
             "- Keep it under ~8 bullet points.\n"
         )
         prompt_user = f"User question:\n{question}\n\nEvidence JSON:\n{_compact(evidence)}\n"
         if raw_preview:
-            system += "\nOn error, include the Raw response preview verbatim at the end inside a fenced code block.\n"
-            prompt_user += f"\nRaw response preview:\n{raw_preview}\n"
+            prompt_user += f"\nBigPanDA raw response snippet:\n{raw_preview}\n"
+        if raw_preview and include_raw:
+            system += "\nInclude the raw BigPanDA response snippet verbatim at the end inside a fenced code block.\n"
 
         delegated = await bamboo_llm_answer_tool.call(
             {"messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt_user}]}
         )
         body = str(delegated[0].get("text", "")) if delegated and isinstance(delegated[0], dict) else str(delegated)
 
-        # Guarantee raw preview appears on errors even if the LLM ignores the instruction.
-        if raw_preview and "Raw response preview" not in body:
+        # If include_raw is set, guarantee the snippet appears even if the LLM ignores the instruction.
+        if raw_preview and include_raw and "raw response" not in body.lower():
             body = (
                 f"{body.rstrip()}\n\n"
-                "Raw response preview:\n"
+                "BigPanDA raw response snippet:\n"
                 "```text\n"
                 f"{raw_preview}\n"
                 "```\n"
