@@ -4,16 +4,9 @@
 
 It is experiment- and workflow-agnostic by design. AskPanDA/ATLAS/Vera Rubin/EPIC and CGSim integrations are implemented as **plugins**, not hard-coded dependencies.
 
-Note: as of February 2026, Bamboo is in early development. The core system is stable, but plugins and documentation are still being built.
+Note: as of March 2026, Bamboo is in early development. The core system is stable, but plugins and documentation are still being built.
 There are only few tools available at this time. The current focus is expanding the infrastructure (esp. orchestration using tool families planning,
 which will eventually enable highly complex prompts).
-The only tool that is fully working at this time is the ATLAS PanDA task status tool. It can be run like this:
-
-```bash
-pip install -e ./core
-pip install -e ./packages/askpanda_atlas
-python3 -m bamboo tools call atlas.task_status --arguments '{"task_id":123456}' (broken example, to be fixed)
-```
 
 I will add a separate examples README when more tools are available.
 
@@ -25,11 +18,24 @@ I will add a separate examples README when more tools are available.
 - Structured evidence is returned alongside natural-language answers
 
 ## Quick start (development)
-
 ```bash
 pip install -e ./core
 pip install -e ./packages/askpanda_atlas
+
+# Configure environment (copy and fill in API keys)
+cp bamboo_env_example.sh bamboo_env.sh
+source bamboo_env.sh
+
+# List available tools
 python -m bamboo tools list
+
+# Start the MCP stdio server
+python -m bamboo.server
+```
+
+To inspect the server interactively using MCP Inspector:
+```bash
+npx @modelcontextprotocol/inspector python3 -m bamboo.server
 ```
 
 ## Documentation
