@@ -1,8 +1,9 @@
-"""Minimal BigPanDA HTTP helpers for standalone (no bamboo core) use.
+"""BigPanDA HTTP helpers.
 
-Used only when ``bamboo.tools._panda_http`` is not importable, i.e. when
-the plugin is installed without bamboo core.  Keep this in sync with the
-canonical helpers in ``bamboo.tools._panda_http``.
+Canonical implementation used by ``askpanda_atlas.task_status_impl``
+via ``askpanda_atlas._fallback_http``. The plugin package keeps a copy
+of these helpers in ``_fallback_http`` for standalone use (when bamboo
+core is not installed) — keep the two in sync when modifying either file.
 """
 from __future__ import annotations
 

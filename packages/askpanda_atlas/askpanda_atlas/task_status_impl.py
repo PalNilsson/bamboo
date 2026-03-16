@@ -1,4 +1,4 @@
-"""ATLAS PanDA task status tool — core implementation.
+"""ATLAS PanDA task status tool — canonical implementation.
 
 Fetches task metadata from BigPanDA and returns structured evidence
 suitable for LLM summarisation.
@@ -21,7 +21,7 @@ import asyncio
 import logging
 from typing import Any
 
-from bamboo.tools._panda_http import (  # type: ignore[import-untyped]
+from askpanda_atlas._fallback_http import (
     datasets_summary,
     fetch_jsonish,
     get_base_url,
@@ -35,7 +35,8 @@ def get_definition() -> dict[str, Any]:
     """Return the MCP tool definition for the task status tool.
 
     Returns:
-        Dict with name, description, inputSchema, examples, and tags.
+        A dict with ``name``, ``description``, ``inputSchema``,
+        ``examples``, and ``tags`` keys.
     """
     return {
         "name": "panda_task_status",
@@ -81,12 +82,14 @@ class PandaTaskStatusTool:
         """Fetch task status and return structured evidence.
 
         Args:
-            arguments: Dict with required ``task_id`` and optional
-                ``query``, ``include_jobs``, ``timeout``.
+            arguments: Dict with required ``task_id`` (int) and optional
+                ``query`` (str), ``include_jobs`` (bool), ``timeout`` (int).
 
         Returns:
-            Dict with ``evidence`` (structured metadata) and ``text``
-            (short human-readable summary).
+            A dict with an ``evidence`` key containing structured task
+            metadata, and a ``text`` key with a short human-readable
+            summary. On error, ``evidence`` will contain an ``error``
+            key describing the failure.
         """
         if not isinstance(arguments, dict):
             return {"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}

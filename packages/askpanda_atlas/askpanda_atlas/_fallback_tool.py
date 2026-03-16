@@ -1,6 +1,6 @@
 """Fallback PandaTaskStatusTool for standalone (no bamboo core) use.
 
-Used only when ``bamboo.tools.task_status_atlas`` is not importable.
+Used only when ``askpanda_atlas.task_status_impl`` is not importable.
 """
 from __future__ import annotations
 
