@@ -219,7 +219,7 @@ class BambooAnswerTool:
             },
         }
 
-    async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:
+    async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:  # noqa: C901
         """Handle bamboo_answer tool invocation with optional task context.
 
         Args:
@@ -350,21 +350,73 @@ class BambooAnswerTool:
         raw_preview = _extract_raw_preview(tool_result, evidence) if is_error else None
 
         system = (
-            "You are AskPanDA for the ATLAS experiment.\n"
-            "Given a user's question and a JSON evidence object from BigPanDA, write a concise, helpful answer.\n"
+            "You are AskPanDA, an assistant for the ATLAS experiment at CERN.\n"
+            "You are given a user question and JSON metadata for a PanDA task fetched from BigPanDA.\n"
+            "Answer the user's specific question using only data explicitly present in the metadata.\n"
             "Rules:\n"
-            "- If evidence.not_found is true or evidence.http_status==404: clearly state that the task ID was\n"
-            "  not found in BigPanDA. Do NOT say 'BigPanDA returned an error' — say the task does not exist\n"
-            "  or the ID is incorrect. Suggest the user double-check the task ID. Do not include a monitor link.\n"
-            "- If evidence indicates a non-JSON or other HTTP error (but not 404): explain that BigPanDA\n"
-            "  returned an unexpected response and include the monitor_url so the user can check manually.\n"
-            "- Otherwise: summarise status, task name, owner, start/end times, dsinfo and dataset failures if present.\n"
-            "- If job_counts is empty but datasets_summary exists, still describe datasets_summary.\n"
-            "- Always include the BigPanDA monitor URL as plain text (not a Markdown hyperlink)\n"
-            "  in non-error cases, e.g.: Monitor: https://bigpanda.cern.ch/task/12345/\n"
-            "- Keep it under ~8 bullet points.\n"
+            "- If evidence.not_found is true or evidence.http_status==404: clearly state that the task ID\n"
+            "  was not found in BigPanDA. Say the task does not exist or the ID is incorrect. Do not\n"
+            "  include a monitor link.\n"
+            "- If evidence indicates a non-JSON or HTTP error (but not 404): explain that BigPanDA returned\n"
+            "  an unexpected response and include the monitor_url so the user can check manually.\n"
+            "- Otherwise: answer the question directly using only fields present in the metadata.\n"
+            "- NEVER infer, guess, or derive values not explicitly in the data. If a requested value is\n"
+            "  absent, say it is not available in the metadata rather than inventing it.\n"
+            "- The Job list section below the metadata lists actual PanDA job IDs. Use ONLY those IDs\n"
+            "  when answering questions about pandaids/job IDs. If the section says no jobs were\n"
+            "  returned, say so — never derive job IDs from dataset IDs or any other field.\n"
+            "- Be concise. Include the BigPanDA monitor URL as plain text at the end in non-error cases,\n"
+            "  e.g.: Monitor: https://bigpanda.cern.ch/task/12345/\n"
         )
-        prompt_user = f"User question:\n{question}\n\nEvidence JSON:\n{_compact(evidence)}\n"
+        # Build the prompt context from the full payload, but handle the jobs list
+        # carefully: it can be large and gets truncated, causing hallucinations.
+        # Instead, extract job pandaids explicitly and present them as a clean list,
+        # then include the rest of the payload without the raw jobs array.
+        payload = evidence.get("payload") if isinstance(evidence, dict) else None
+        if isinstance(payload, dict):
+            _job_keys = ("jobs", "jobList", "joblist", "job_list", "jobSummary")
+            jobs_list = next(
+                (payload.get(k) for k in _job_keys
+                 if isinstance(payload.get(k), list)),
+                None,
+            )
+            # Build a compact payload without the raw jobs array to avoid truncation.
+            payload_slim = {k: v for k, v in payload.items() if k not in _job_keys}
+            evidence_for_prompt: Any = payload_slim
+            # Add a clean job summary (or explicit absence note) so the LLM knows
+            # whether job IDs are available — preventing hallucination.
+            if not jobs_list:
+                job_context = (
+                    "\n\nJob list: No job records were returned for this task."
+                    " Do not infer PanDA job IDs from any other field."
+                )
+            elif jobs_list:
+                pandaids = [
+                    j.get("pandaid") or j.get("PandaID") or j.get("panda_id")
+                    for j in jobs_list if isinstance(j, dict)
+                ]
+                pandaids = [str(p) for p in pandaids if p is not None]
+                statuses = [
+                    j.get("jobStatus") or j.get("status") or ""
+                    for j in jobs_list if isinstance(j, dict)
+                ]
+                job_rows = [
+                    f"  pandaid={pid} status={st}"
+                    for pid, st in zip(pandaids, statuses)
+                ]
+                tail = "\n  …(truncated)" if len(jobs_list) > 200 else ""
+                job_context = (
+                    f"\n\nJob list ({len(jobs_list)} jobs):\n"
+                    f"{"\n".join(job_rows[:200])}{tail}"
+                )
+        else:
+            evidence_for_prompt = evidence
+            job_context = ""
+        prompt_user = (
+            f"User question:\n{question}\n"
+            f"\nTask metadata (JSON):\n{_compact(evidence_for_prompt)}"
+            f"{job_context}\n"
+        )
         if raw_preview:
             prompt_user += f"\nBigPanDA raw response snippet:\n{raw_preview}\n"
         if raw_preview and include_raw:
@@ -375,11 +427,12 @@ class BambooAnswerTool:
         )
         body = str(delegated[0].get("text", "")) if delegated and isinstance(delegated[0], dict) else str(delegated)
 
-        # If include_raw is set, guarantee the snippet appears even if the LLM ignores the instruction.
-        if raw_preview and include_raw and "raw response" not in body.lower():
+        # Always append the raw snippet when include_raw is set — do not rely on
+        # the LLM to include it, as it often ignores that instruction.
+        if raw_preview and include_raw:
             body = (
                 f"{body.rstrip()}\n\n"
-                "BigPanDA raw response snippet:\n"
+                "**BigPanDA raw response snippet:**\n"
                 "```text\n"
                 f"{raw_preview}\n"
                 "```\n"

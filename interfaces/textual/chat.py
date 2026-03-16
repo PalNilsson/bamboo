@@ -256,6 +256,8 @@ class BambooTui(App):
 
         self.debug_mode: bool = False
         self._mcp_ready: bool = False
+        self._last_raw_result: Any = None  # Most recent raw MCP tool result for /json
+        self._last_task_id: Optional[int] = None  # Most recent task ID queried
 
         self.banner_widget: Optional[Static] = None
         self.transcript: Optional[RichLog] = None
@@ -577,9 +579,19 @@ class BambooTui(App):
             args["model"] = model
             args["llm_model"] = model
 
+        # Store task ID if present so /json can fetch the raw payload directly.
+        try:
+            import re as _re
+            m = _re.search(r"\btask[:#/\-\s]+(\d{4,12})\b", question, _re.IGNORECASE)
+            if m:
+                self._last_task_id = int(m.group(1))
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
         thinking: bool = self._write_thinking()
         try:
             res = await self._to_thread(self.mcp.call_tool, self.answer_tool, args)
+            self._last_raw_result = res  # Available via /json
             if self.debug_mode:
                 self._write_tool(self.answer_tool, args, res)
 
@@ -613,6 +625,7 @@ class BambooTui(App):
                 "  /help                 Show this help\n"
                 "  /tools                List tools exposed by the MCP server\n"
                 "  /task <id>             Shorthand for: status of task <id>\n"
+                "  /json                 Show full raw server JSON for last response\n"
                 "  /plugin <id>          Switch plugin (affects banner tool name)\n"
                 "  /debug on|off         Toggle debug (shows tool calls + raw results)\n"
                 "  /clear                Clear transcript\n"
@@ -636,6 +649,10 @@ class BambooTui(App):
                 return
             body = "\n".join(f"- `{n}`" for n in self.tool_names)
             self._write_panel(Markdown(body), title=f"{_now()}  tools")
+            return
+
+        if cmd == "/json":
+            await self._handle_json_command()
             return
 
         if cmd == "/plugin":
@@ -795,7 +812,7 @@ class BambooTui(App):
         self._write_panel(Text(msg), title=f"{_now()}  error", border_style="red")
 
     def _write_tool(self, tool: str, args: Dict[str, Any], res: Any) -> None:
-        """Write a debug tool call block.
+        """Write a debug tool call block showing args and full raw result.
 
         Args:
             tool (str): Tool name.
@@ -808,6 +825,131 @@ class BambooTui(App):
             f"**result:**\n```text\n{_extract_text(res) or _pretty(res)}\n```"
         )
         self._write_panel(Markdown(body), title=f"{_now()}  tool", border_style="cyan")
+
+    async def _handle_json_command(self) -> None:
+        """Fetch and display the raw BigPanDA JSON for the last queried task.
+
+        Calls ``panda_task_status`` directly (bypassing the LLM) so the output
+        is the unmodified server payload. Falls back to parsing the last MCP
+        result if no task ID is known.
+        """
+        if not self._mcp_ready:
+            self._write_system("Not connected yet.")
+            return
+
+        if self._last_task_id is not None:
+            # Fetch directly from the task status tool — no LLM involved.
+            try:
+                res = await self._to_thread(
+                    self.mcp.call_tool,
+                    "panda_task_status",
+                    {"task_id": self._last_task_id, "include_jobs": True},
+                )
+                payload = self._extract_bigpanda_payload(res)
+                if payload is not None:
+                    self._write_panel(
+                        Markdown(f"```json\n{_pretty(payload)}\n```"),
+                        title=f"{_now()}  raw JSON — task {self._last_task_id}",
+                        border_style="cyan",
+                    )
+                    return
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                self._write_error(f"Could not fetch raw JSON: {exc}")
+                return
+
+        if self._last_raw_result is not None:
+            payload = self._extract_bigpanda_payload(self._last_raw_result)
+            if payload is not None:
+                self._write_panel(
+                    Markdown(f"```json\n{_pretty(payload)}\n```"),
+                    title=f"{_now()}  raw JSON",
+                    border_style="cyan",
+                )
+                return
+
+        self._write_system("No task result yet — ask about a task first.")
+
+    def _write_raw_json(self, res: Any) -> None:
+        """Write the full raw BigPanDA JSON for the last tool result.
+
+        Triggered by the ``/json`` command. Extracts the BigPanDA payload
+        from the MCP result envelope, handling both dict and SDK object forms.
+
+        Args:
+            res (Any): Raw MCP tool result to display.
+        """
+        payload = self._extract_bigpanda_payload(res)
+        if payload is None:
+            self._write_system("Could not extract BigPanDA payload from last result.")
+            return
+        self._write_panel(
+            Markdown(f"```json\n{_pretty(payload)}\n```"),
+            title=f"{_now()}  raw JSON (BigPanDA)",
+            border_style="cyan",
+        )
+
+    @staticmethod
+    def _extract_bigpanda_payload(res: Any) -> Any:
+        """Extract the raw BigPanDA payload from an MCP tool result.
+
+        The MCP SDK wraps results in a ``CallToolResult`` object with a
+        ``content`` list of ``TextContent`` items. The text itself is the
+        LLM answer, which embeds structured data in a JSON prefix when the
+        tool returns evidence. This method peels back all those layers.
+
+        Args:
+            res: Raw value returned by ``MCPClientSync.call_tool``.
+
+        Returns:
+            The BigPanDA payload dict, or ``None`` if it cannot be found.
+        """
+        # 1. Unwrap MCP SDK CallToolResult object → get text string.
+        text: str | None = None
+        content_attr = getattr(res, "content", None)
+        if content_attr is not None:
+            # SDK object: res.content is a list of TextContent items.
+            items = content_attr if isinstance(content_attr, list) else [content_attr]
+            for item in items:
+                t = getattr(item, "text", None) or (
+                    item.get("text") if isinstance(item, dict) else None
+                )
+                if isinstance(t, str) and t.strip():
+                    text = t
+                    break
+        elif isinstance(res, list) and res:
+            first = res[0]
+            text = (
+                first.get("text") if isinstance(first, dict)
+                else getattr(first, "text", None)
+            )
+        elif isinstance(res, dict):
+            text = res.get("text")
+        elif isinstance(res, str):
+            text = res
+
+        if not isinstance(text, str):
+            return None
+
+        # 2. Try to parse the text as JSON — panda_task_status returns a
+        # dict {"evidence": {"payload": {...}, ...}, "text": "..."} serialised
+        # as JSON inside the TextContent.text field.
+        text = text.strip()
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                evidence = parsed.get("evidence")
+                if isinstance(evidence, dict):
+                    payload = evidence.get("payload")
+                    if isinstance(payload, dict):
+                        return payload
+                    # No payload key — return the evidence dict itself.
+                    return evidence
+                return parsed
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
+        # 3. Text is plain (LLM answer) — payload not embedded.
+        return None
 
 
 def main() -> None:
