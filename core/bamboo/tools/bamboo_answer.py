@@ -513,9 +513,10 @@ class BambooAnswerTool:
                     for pid, st in zip(pandaids, statuses)
                 ]
                 tail = "\n  …(truncated)" if len(jobs_list) > 200 else ""
+                _rows = "\n".join(job_rows[:200])
                 job_context = (
                     f"\n\nJob list ({len(jobs_list)} jobs):\n"
-                    f"{"\n".join(job_rows[:200])}{tail}"
+                    f"{_rows}{tail}"
                 )
         else:
             evidence_for_prompt = evidence
