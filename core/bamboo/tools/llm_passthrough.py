@@ -16,8 +16,10 @@ from typing import Any, cast
 from bamboo.prompts.templates import get_bamboo_system_prompt
 from bamboo.tools.base import text_content, coerce_messages
 
+from bamboo.llm.exceptions import LLMError
 from bamboo.llm.runtime import get_llm_manager, get_llm_selector
 from bamboo.llm.types import GenerateParams, Message
+from bamboo.tracing import EVENT_LLM_CALL, span
 
 
 class LLMPassthroughTool:
@@ -132,11 +134,28 @@ class LLMPassthroughTool:
                 raise ValueError("Either 'question' or non-empty 'messages' must be provided.")
             messages.append({"role": "user", "content": question})
 
-        resp = await client.generate(
-            messages=messages,
-            params=GenerateParams(temperature=temperature, max_tokens=max_tokens_int),
-        )
-        return text_content(f"{debug}\n\n{resp.text}")
+        try:
+            async with span(
+                EVENT_LLM_CALL,
+                tool="bamboo_llm_answer",
+                provider=model_spec.provider,
+                model=model_spec.model,
+            ) as _llm_span:
+                resp = await client.generate(
+                    messages=messages,
+                    params=GenerateParams(temperature=temperature, max_tokens=max_tokens_int),
+                )
+                _usage = resp.usage
+                _llm_span.set(
+                    input_tokens=_usage.input_tokens if _usage else None,
+                    output_tokens=_usage.output_tokens if _usage else None,
+                )
+            return text_content(f"{debug}\n\n{resp.text}")
+        except LLMError:
+            # Re-raise so the orchestrating tool (bamboo_answer) can apply its
+            # own friendly-error handler.  Do not swallow here — the span will
+            # still have been emitted via the finally branch of the context manager.
+            raise
 
 
 bamboo_llm_answer_tool = LLMPassthroughTool()

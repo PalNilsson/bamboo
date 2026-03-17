@@ -54,11 +54,32 @@ def _is_shutdown_exception(exc: BaseException) -> bool:
 async def main() -> None:
     """Run the Bamboo MCP stdio server.
 
-    Prints a startup banner to stderr (keeping stdout clean for the MCP
-    stdio protocol), then bootstraps the MCP Server via ``create_server()``
-    and serves it over the stdio transport.
+    When the ``BAMBOO_QUIET`` environment variable is set to ``"1"`` (as the
+    Textual TUI does when launching via stdio), the process-level stderr file
+    descriptor is redirected to ``/dev/null`` before any output is written.
+    This prevents startup banners, third-party library log lines, and any
+    other stderr noise from leaking onto the terminal and corrupting the TUI
+    display.  Tracing output uses ``BAMBOO_TRACE_FILE`` in this mode and is
+    therefore unaffected.
+
+    In normal (non-quiet) operation a startup banner is printed to stderr.
     """
-    print(f"Bamboo MCP server v{Config.SERVER_VERSION} starting …", file=sys.stderr)
+    import os as _os
+
+    if _os.getenv("BAMBOO_QUIET") == "1":
+        # Redirect the underlying stderr file descriptor to /dev/null so that
+        # *all* stderr output from this process (including third-party libs
+        # that write directly to fd 2) is silently discarded.  We do this at
+        # the fd level rather than just replacing sys.stderr so that C
+        # extensions and the MCP SDK's own asyncio transports are also covered.
+        try:
+            _devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
+            _os.dup2(_devnull_fd, 2)
+            _os.close(_devnull_fd)
+        except OSError:
+            pass  # If the redirect fails, continue normally — better noisy than broken.
+    else:
+        print(f"Bamboo MCP server v{Config.SERVER_VERSION} starting …", file=sys.stderr)
 
     app: Server = create_server()
     async with stdio_server() as (read_stream, write_stream):

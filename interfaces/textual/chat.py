@@ -30,11 +30,13 @@ import json
 import re
 import os
 import sys
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -71,6 +73,55 @@ def _now() -> str:
         str: Local time formatted as ``HH:MM:SS``.
     """
     return time.strftime("%H:%M:%S")
+
+
+def _span_detail(span_rec: Dict[str, Any]) -> str:
+    """Format the most useful extra fields from a trace span as a short string.
+
+    Args:
+        span_rec: A parsed trace span dict from the NDJSON trace file.
+
+    Returns:
+        A compact human-readable summary of the span's event-specific fields,
+        e.g. ``"route=rag"`` or ``"allowed=True reason=keyword_allow"``.
+    """
+    event = str(span_rec.get("event", ""))
+
+    if event == "tool_call":
+        keys = span_rec.get("args_keys", [])
+        return f"args={keys}" if keys else ""
+
+    if event == "guard":
+        allowed = span_rec.get("allowed")
+        reason = span_rec.get("reason", "")
+        llm = span_rec.get("llm_used", False)
+        llm_tag = " llm=yes" if llm else ""
+        return f"allowed={allowed} reason={reason}{llm_tag}"
+
+    if event == "retrieval":
+        backend = span_rec.get("backend", "")
+        hits = span_rec.get("hits")
+        hits_str = str(hits) if hits is not None else "?"
+        return f"backend={backend} hits={hits_str}"
+
+    if event == "llm_call":
+        provider = span_rec.get("provider", "")
+        model = span_rec.get("model", "")
+        inp = span_rec.get("input_tokens")
+        out = span_rec.get("output_tokens")
+        tokens = ""
+        if inp is not None or out is not None:
+            tokens = f" tokens={inp}→{out}"
+        return f"{provider}/{model}{tokens}"
+
+    if event == "synthesis":
+        route = span_rec.get("route", "")
+        return f"route={route}"
+
+    # Unknown event — show all extra keys.
+    skip = {"bamboo_trace", "event", "tool", "ts", "duration_ms"}
+    extras = {k: v for k, v in span_rec.items() if k not in skip}
+    return str(extras) if extras else ""
 
 
 def _pretty(obj: Any) -> str:
@@ -258,6 +309,10 @@ class BambooTui(App):
         self._mcp_ready: bool = False
         self._last_raw_result: Any = None  # Most recent raw MCP tool result for /json
         self._last_task_id: Optional[int] = None  # Most recent task ID queried
+        self._last_spans: List[Dict[str, Any]] = []  # Trace spans for last request
+        self._trace_file: str = os.path.join(
+            tempfile.gettempdir(), f"bamboo_trace_{os.getpid()}.jsonl"
+        )
 
         self.banner_widget: Optional[Static] = None
         self.transcript: Optional[RichLog] = None
@@ -590,7 +645,9 @@ class BambooTui(App):
 
         thinking: bool = self._write_thinking()
         try:
+            _pre_pos = self._snapshot_trace_position()
             res = await self._to_thread(self.mcp.call_tool, self.answer_tool, args)
+            self._last_spans = self._collect_spans(_pre_pos)
             self._last_raw_result = res  # Available via /json
             if self.debug_mode:
                 self._write_tool(self.answer_tool, args, res)
@@ -626,6 +683,7 @@ class BambooTui(App):
                 "  /tools                List tools exposed by the MCP server\n"
                 "  /task <id>             Shorthand for: status of task <id>\n"
                 "  /json                 Show full raw server JSON for last response\n"
+                "  /tracing              Show timing + trace spans for last request\n"
                 "  /plugin <id>          Switch plugin (affects banner tool name)\n"
                 "  /debug on|off         Toggle debug (shows tool calls + raw results)\n"
                 "  /clear                Clear transcript\n"
@@ -649,6 +707,10 @@ class BambooTui(App):
                 return
             body = "\n".join(f"- `{n}`" for n in self.tool_names)
             self._write_panel(Markdown(body), title=f"{_now()}  tools")
+            return
+
+        if cmd == "/tracing":
+            self._handle_tracing_command()
             return
 
         if cmd == "/json":
@@ -683,6 +745,112 @@ class BambooTui(App):
             return
 
         self._write_system(f"Unknown command: {cmdline} (try /help)")
+
+    # ------------------------------------------------------------------
+    # Tracing helpers
+    # ------------------------------------------------------------------
+
+    def _snapshot_trace_position(self) -> int:
+        """Return the current end-of-file byte position of the trace file.
+
+        Called immediately before each MCP tool invocation so that
+        :meth:`_collect_spans` can read only the spans produced by that
+        specific request.
+
+        Returns:
+            Current file size in bytes, or 0 if tracing is not configured.
+        """
+        try:
+            return os.path.getsize(self._trace_file)
+        except OSError:
+            return 0
+
+    def _collect_spans(self, position: int) -> List[Dict[str, Any]]:
+        """Read trace spans written to the trace file since *position*.
+
+        Args:
+            position: Byte offset obtained from :meth:`_snapshot_trace_position`
+                before the request was issued.
+
+        Returns:
+            List of parsed span dicts in emission order.  Non-JSON lines and
+            lines without the ``"bamboo_trace"`` sentinel are silently skipped.
+        """
+        spans: List[Dict[str, Any]] = []
+        try:
+            with open(self._trace_file, "r", encoding="utf-8") as fh:
+                fh.seek(position)
+                for raw in fh:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        obj = json.loads(raw)
+                        if isinstance(obj, dict) and obj.get("bamboo_trace"):
+                            spans.append(obj)
+                    except json.JSONDecodeError:
+                        pass
+        except OSError:
+            pass
+        return spans
+
+    def _handle_tracing_command(self) -> None:
+        """Render a Rich table of trace spans for the most recent request.
+
+        Displays event type, tool name, duration, and the most important
+        event-specific fields (route, backend/hits, guard verdict, token
+        counts) in a compact panel.  If no spans are available — because
+        tracing is disabled or no request has been made yet — a helpful
+        explanation is shown instead.
+        """
+        if not self._last_spans:
+            if self.cfg.transport == "http":
+                self._write_system(
+                    "No trace spans available.\n\n"
+                    "HTTP transport: set BAMBOO_TRACE=1 and BAMBOO_TRACE_FILE on the server "
+                    "process, then tail the file manually:\n"
+                    "  tail -f $BAMBOO_TRACE_FILE | grep bamboo_trace | jq ."
+                )
+            else:
+                self._write_system(
+                    "No trace spans yet — ask a question first, then type /tracing."
+                )
+            return
+
+        # Build the summary table.
+        table = Table(
+            show_header=True,
+            header_style="bold",
+            box=None,
+            pad_edge=False,
+            collapse_padding=True,
+        )
+        table.add_column("Event", style="cyan", no_wrap=True)
+        table.add_column("Tool", style="", no_wrap=True)
+        table.add_column("ms", justify="right", style="yellow", no_wrap=True)
+        table.add_column("Detail", style="dim")
+
+        total_ms: float = 0.0
+        for span_rec in self._last_spans:
+            event = str(span_rec.get("event", ""))
+            tool = str(span_rec.get("tool", ""))
+            duration = float(span_rec.get("duration_ms", 0.0))
+            if event == "tool_call":
+                total_ms = duration  # outermost span — use as request total
+
+            detail = _span_detail(span_rec)
+            table.add_row(event, tool, f"{duration:.0f}", detail)
+
+        # Footer row with total.
+        table.add_section()
+        table.add_row(
+            "[bold]total[/bold]",
+            "",
+            f"[bold yellow]{total_ms:.0f}[/bold yellow]",
+            "wall time for full tool_call span",
+        )
+
+        self._write_panel(table, title=f"{_now()}  tracing", border_style="cyan")
 
     def _write_panel(self, renderable: Any, title: str, border_style: str = "dim") -> None:
         """Write a panel to the transcript.
@@ -969,11 +1137,16 @@ def main() -> None:
     if args.transport == "http":
         cfg = MCPServerConfig(transport="http", http_url=args.http_url, terminate_on_close=args.terminate_on_close)
     else:
+        _trace_file = os.path.join(tempfile.gettempdir(), f"bamboo_trace_{os.getpid()}.jsonl")
+        _stdio_env = os.environ.copy()
+        _stdio_env["BAMBOO_TRACE"] = "1"
+        _stdio_env["BAMBOO_TRACE_FILE"] = _trace_file
+        _stdio_env["BAMBOO_QUIET"] = "1"  # redirect server stderr → /dev/null
         cfg = MCPServerConfig(
             transport="stdio",
             stdio_command=sys.executable,
             stdio_args=["-m", "bamboo.server"],
-            stdio_env=os.environ.copy()
+            stdio_env=_stdio_env,
         )
 
     app = BambooTui(cfg=cfg, plugin_id=args.plugin)

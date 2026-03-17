@@ -1,0 +1,6 @@
+# OpenTelemetry export for Bamboo tracing — optional.
+# When BAMBOO_OTEL_ENDPOINT is set, spans are exported via OTLP/gRPC to
+# any compatible backend (Jaeger, Grafana Tempo, Honeycomb, Datadog, etc.).
+# Install with: pip install -r requirements-otel.txt
+opentelemetry-sdk>=1.20
+opentelemetry-exporter-otlp-proto-grpc>=1.20

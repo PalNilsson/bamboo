@@ -1,0 +1,3 @@
+# Anthropic provider for Bamboo — required for provider="anthropic".
+# Install with: pip install -r requirements-anthropic.txt
+anthropic>=0.25

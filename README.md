@@ -44,6 +44,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 - [MCP server & LLM internals](docs/mcp.md)
 - [Writing plugins](docs/plugins.md)
 - [RAG system](docs/rag.md)
+- [Tracing](docs/tracing.md)
 - [Authentication & Security](docs/security.md)
 - [Interfaces](docs/interfaces.md)
 

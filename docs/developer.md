@@ -1,6 +1,9 @@
 # Developer guide
 
-This guide covers local development setup, editable installs, and testing.
+This guide covers local development setup, editable installs, testing, and
+linting.
+
+---
 
 ## Development environment
 
@@ -10,57 +13,209 @@ source .venv/bin/activate
 python -m pip install -U pip setuptools
 ```
 
-## Editable installs (important)
+---
 
-Bamboo uses **editable installs** so that plugins register entry points.
+## Editable installs
+
+Bamboo uses **editable installs** so that plugins register their entry points
+correctly with `importlib.metadata`.
 
 ```bash
+# Core server + ATLAS plugin (minimum for development)
 pip install -e ./core
 pip install -e ./packages/askpanda_atlas
-```
 
-Install additional plugins the same way:
-
-```bash
+# Additional plugins
 pip install -e ./packages/cgsim
+pip install -e ./packages/askpanda_verarubin
+pip install -e ./packages/askpanda_epic
 ```
 
-## When you MUST re-run `pip install -e`
-
-Re-run editable installs after changing:
+**You must re-run `pip install -e` after changing:**
 
 - any `pyproject.toml`
 - entry-point definitions (`bamboo.tools`)
 - plugin dependencies
 - package layout / module paths
 
-You do NOT need to reinstall if you only change Python source files.
+You do NOT need to reinstall for plain Python source file changes.
+
+---
+
+## Optional feature dependencies
+
+Bamboo uses separate requirements files for optional features so the core
+package stays lightweight.
+
+| File | Install when… |
+|---|---|
+| `requirements.txt` | Always — base MCP server dependencies |
+| `requirements-dev.txt` | Running tests or linting |
+| `requirements-mistral.txt` | Using `LLM_DEFAULT_PROVIDER=mistral` |
+| `requirements-openai.txt` | Using `LLM_DEFAULT_PROVIDER=openai` or `openai_compat` |
+| `requirements-anthropic.txt` | Using `LLM_DEFAULT_PROVIDER=anthropic` |
+| `requirements-gemini.txt` | Using `LLM_DEFAULT_PROVIDER=gemini` |
+| `requirements-rag.txt` | Using the RAG pipeline (`panda_doc_search`, `panda_doc_bm25`) |
+| `requirements-otel.txt` | Exporting traces via OpenTelemetry (`BAMBOO_OTEL_ENDPOINT`) |
+| `requirements-textual.txt` | Running the Textual TUI |
+| `requirements-ui.txt` | Running the Streamlit UI |
+
+---
+
+## Running tests
+
+Install dev dependencies first:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+This installs `pytest`, `pytest-asyncio>=0.21`, `flake8`, `pylint`, and the
+circular-import detector.  **`pytest-asyncio>=0.21` is required** — the test
+suite uses `asyncio_mode = "strict"` (set in `pyproject.toml`) and most tests
+are `async def`.  Without it every async test will fail with
+`"async def functions are not natively supported"`.
+
+Run all tests from the repo root:
+
+```bash
+pytest tests/
+# or quieter:
+pytest -q tests/
+# single file:
+pytest tests/test_task_status.py
+# single test:
+pytest tests/test_task_status.py::test_task_status_success_json
+```
+
+All 168 tests run fully offline — no API keys, no network, no ChromaDB
+instance required.
+
+---
+
+## Test suite layout
+
+```
+tests/
+├── conftest.py                  # sys.path setup for non-installed runs
+│
+├── test_task_status.py          # panda_task_status — BigPanDA HTTP tool
+├── test_job_status.py           # panda_job_status
+├── test_log_analysis.py         # panda_log_analysis — failure classification
+├── test_doc_rag.py              # panda_doc_search — ChromaDB vector search
+├── test_doc_bm25.py             # panda_doc_bm25 — BM25 keyword search
+├── test_topic_guard.py          # two-stage topic guard
+├── test_bamboo_answer_rag.py    # bamboo_answer — RAG routing branch
+├── test_llm_error_handling.py   # friendly LLM error messages, all routes
+├── test_planner.py              # bamboo_plan — LLM planner tool
+│
+├── test_llm_providers.py        # OpenAI / Anthropic / Gemini / compat clients
+│
+├── test_tracing.py              # bamboo.tracing — NDJSON spans, file output
+├── test_tracing_otel.py         # bamboo.tracing — OpenTelemetry integration
+│
+├── test_panda_http_sync.py      # _panda_http / _fallback_http parity
+├── test_loader.py               # plugin entry-point loader
+└── test_cli.py                  # bamboo CLI
+```
+
+### Testing strategy
+
+- **Unit-test tools by mocking external services** — BigPanDA HTTP, LLM
+  providers, ChromaDB, and upstream MCP servers are all mocked with
+  `unittest.mock`.
+- **No real credentials needed** — all async tests use `AsyncMock`; all
+  provider tests mock the vendor SDK at the module level.
+- **Tracing tests** mock `_start_otel_span` and `_get_otel_tracer` directly
+  rather than patching `sys.modules`, which is more reliable across pytest
+  isolation modes.
+- **`bamboo.tools` rule**: tools must always return a result and never raise.
+  Error-handling tests verify this contract end-to-end.
+
+---
+
+## Environment configuration
+
+Copy the example file and fill in your credentials:
+
+```bash
+cp bamboo_env_example.sh bamboo_env.sh
+source bamboo_env.sh
+```
+
+Key variables:
+
+| Variable | Purpose |
+|---|---|
+| `LLM_DEFAULT_PROVIDER` | `mistral`, `openai`, `anthropic`, `gemini`, `openai_compat` |
+| `LLM_DEFAULT_MODEL` | Model string for the chosen provider |
+| `MISTRAL_API_KEY` / `OPENAI_API_KEY` / … | Provider API keys |
+| `ASKPANDA_ENABLE_REAL_PANDA` | `1` to use real BigPanDA API |
+| `BAMBOO_TRACE` | `1` to enable structured tracing |
+| `BAMBOO_TRACE_FILE` | Write trace NDJSON to file (required for TUI) |
+| `BAMBOO_OTEL_ENDPOINT` | OTLP/gRPC endpoint for OpenTelemetry export |
+
+See `bamboo_env_example.sh` for the full list and `docs/tracing.md` for
+tracing details.
+
+---
 
 ## CLI
 
-List discovered tools:
-
 ```bash
+# List all registered tools
 python -m bamboo tools list
 python -m bamboo tools list --json
+
+# Start the MCP server (stdio)
+python -m bamboo.server
+
+# Inspect with MCP Inspector
+npx @modelcontextprotocol/inspector python3 -m bamboo.server
 ```
 
-## Running unit tests
+---
 
-Install test dependencies:
+## Linting
 
 ```bash
-pip install -U pytest pytest-mock
+# Flake8 (max line length 200, complexity 15)
+flake8 .
+
+# Pylint
+pylint core/ interfaces/ packages/
+
+# Type checking
+pyright .
+
+# Pre-commit (runs flake8 + circular import detection on changed files)
+pre-commit run --all-files
 ```
 
-Run tests from the repo root:
+The pre-commit hook checks for circular imports using
+`circular-import-detector==1.0.18`.  Run it before opening a PR.
 
-```bash
-pytest -q tests/
-```
+---
 
-## Testing strategy
+## Adding a new LLM provider
 
-- Unit-test tools by mocking external services (e.g. BigPanDA HTTP)
-- Keep tool tests deterministic and fast
-- Integration-test MCP endpoints separately (optional)
+1. Create `core/bamboo/llm/providers/<name>_client.py` following the pattern
+   of `mistral_client.py` — lazy SDK import, async semaphore, retry loop,
+   `LLMConfigError` / `LLMRateLimitError` escape the retry loop immediately.
+2. Register it in `core/bamboo/llm/factory.py` → `_PROVIDER_MAP`.
+3. Add `requirements-<name>.txt` with the SDK dependency.
+4. Add tests in `tests/test_llm_providers.py` — happy path, missing API key,
+   missing SDK, rate limit, timeout, retry.
+5. Document the new env vars in `bamboo_env_example.sh`.
+
+## Adding a new tool
+
+1. Create `core/bamboo/tools/<name>.py` implementing `get_definition()` and
+   an async `call(arguments)` that **always returns a result** (never raises).
+2. Register the singleton in `core/bamboo/core.py` → `TOOLS`.
+3. Wrap any LLM call sites with the tracing `span()` context manager.
+4. Add tests.
+
+## Writing a plugin
+
+See `docs/plugins.md`.

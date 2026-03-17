@@ -1,0 +1,4 @@
+# OpenAI provider for Bamboo — required for provider="openai" and provider="openai_compat".
+# Also used for OpenAI-compatible endpoints (vLLM, Ollama, LM Studio, Together, Fireworks, etc.)
+# Install with: pip install -r requirements-openai.txt
+openai>=1.0

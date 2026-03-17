@@ -1,0 +1,3 @@
+# Google Gemini provider for Bamboo — required for provider="gemini".
+# Install with: pip install -r requirements-gemini.txt
+google-generativeai>=0.7
