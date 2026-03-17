@@ -23,3 +23,6 @@ default_namespace = "atlas"
 # Plugin packages (e.g. packages/askpanda_atlas) register their own entry
 # points under bamboo.tools in their own pyproject.toml.
 # [project.entry-points."bamboo.tools"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"

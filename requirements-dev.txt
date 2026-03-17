@@ -3,4 +3,5 @@ pylint
 pydocstyle
 pyright
 pytest
+pytest-asyncio
 circular-import-detector==1.0.18
