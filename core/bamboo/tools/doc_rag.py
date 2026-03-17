@@ -1,68 +1,250 @@
-"""Dummy documentation/RAG tool.
+"""ChromaDB-backed documentation retrieval tool.
 
-Later, replace the dummy implementation with:
-- local KB retrieval (BM25/FAISS)
-- PanDA/ATLAS docs ingestion
-- optional LLM synthesis
+Replaces the earlier dummy implementation with a real vector-store query
+against a pre-built ChromaDB persistent collection.  The ingestion pipeline
+that populates the collection is managed separately and is **not** part of
+this module.
+
+Configuration (environment variables):
+
+    BAMBOO_CHROMA_PATH       Path to the ChromaDB persistent directory.
+                             Default: ``./chroma_db``
+    BAMBOO_CHROMA_COLLECTION Name of the ChromaDB collection to query.
+                             Default: ``bamboo_docs``
+
+The ChromaDB client is initialised lazily on the first ``call()`` and then
+cached on the tool instance.  If the ``chromadb`` package is not installed,
+or the configured path does not exist, the tool returns a human-readable
+error message rather than raising — callers always receive a result.
 """
 from __future__ import annotations
+
+import os
 from typing import Any
+
 from bamboo.tools.base import text_content
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CHROMA_PATH = "./chroma_db"
+_DEFAULT_CHROMA_COLLECTION = "bamboo_docs"
+_SNIPPET_MAX_CHARS = 500
 
 
 class PandaDocSearchTool:
-    """Dummy document search tool used for AskPanDA development.
+    """ChromaDB-backed document search tool for the Bamboo MCP server.
 
-    This placeholder implements a minimal searchable interface that clients
-    can call while the real knowledge-base-backed retrieval and RAG logic is
-    being developed. It returns a small human-readable text payload with
-    simulated hits.
+    Queries a pre-built ChromaDB vector store and returns the top-k most
+    relevant document chunks together with their metadata and distance scores.
+
+    The ChromaDB client and collection handle are initialised on the first
+    call and cached for subsequent calls.  Call :meth:`_reset` to force
+    re-initialisation (useful in tests).
+
+    Attributes:
+        _client: Cached ChromaDB ``PersistentClient`` instance, or ``None``
+            if not yet initialised.
+        _collection: Cached ChromaDB ``Collection`` handle, or ``None`` if
+            not yet initialised.
     """
+
+    def __init__(self) -> None:
+        self._client: Any = None
+        self._collection: Any = None
+
+    # ------------------------------------------------------------------
+    # Tool protocol
+    # ------------------------------------------------------------------
 
     @staticmethod
     def get_definition() -> dict[str, Any]:
-        """Return the tool discovery definition.
-
-        The dictionary describes the tool name, description and input schema
-        so clients can discover and validate calls to this tool.
+        """Return the MCP tool discovery definition.
 
         Returns:
             Dict[str, Any]: Tool definition compatible with the MCP discovery
-            format used elsewhere in the project.
+            format used by the Bamboo server.
         """
         return {
             "name": "panda_doc_search",
-            "description": "Search AskPanDA documentation knowledge base (dummy implementation).",
+            "description": (
+                "Search the Bamboo/PanDA documentation knowledge base using "
+                "semantic similarity.  Returns the most relevant document "
+                "chunks from a pre-built ChromaDB vector store."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "What to search for"},
-                    "top_k": {"type": "integer", "description": "How many hits to return", "default": 5},
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language question or keyword query.",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results to return (default: 5).",
+                        "default": 5,
+                    },
                 },
                 "required": ["query"],
             },
         }
 
     async def call(self, arguments: dict[str, Any]) -> list[dict[str, Any]]:
-        """Execute the dummy document search.
+        """Query the ChromaDB collection and return the top-k results.
 
         Args:
-            arguments: Mapping with keys expected by the tool (``query`` and
-                optional ``top_k``).
+            arguments: Mapping with the following keys:
+
+                - ``query`` (*str*, required): The search query.
+                - ``top_k`` (*int*, optional): Number of results; default 5,
+                  clamped to the range [1, 20].
 
         Returns:
-            List[Dict[str, Any]]: A list of content blocks to return to the
-            caller. The current implementation returns a single text block
-            produced by the ``text_content`` helper.
+            List[Dict[str, Any]]: A one-element MCP text content list produced
+            by :func:`~bamboo.tools.base.text_content`.  The text contains a
+            numbered list of document snippets with metadata and distance
+            scores, or an error message if retrieval failed.
         """
-        query = arguments.get("query", "")
-        top_k = int(arguments.get("top_k", 5))
-        # Dummy "results"
-        hits = [
-            f"[{(i + 1)}] Dummy KB hit for: '{query}' (score={(1.0 - i * 0.1):.2f})"
-            for i in range(max(1, min(top_k, 5)))
+        query: str = str(arguments.get("query", "")).strip()
+        if not query:
+            return text_content("Error: 'query' argument is required and must not be empty.")
+
+        top_k: int = max(1, min(int(arguments.get("top_k", 5)), 20))
+
+        # Attempt lazy initialisation; returns an error string on failure.
+        init_error = self._ensure_collection()
+        if init_error:
+            return text_content(init_error)
+
+        # Query the collection.
+        try:
+            results = self._collection.query(
+                query_texts=[query],
+                n_results=top_k,
+                include=["documents", "metadatas", "distances"],
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            return text_content(f"ChromaDB query failed: {exc}")
+
+        return text_content(self._format_results(query, results, top_k))
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_collection(self) -> str | None:
+        """Initialise the ChromaDB client and collection if not already done.
+
+        Reads ``BAMBOO_CHROMA_PATH`` and ``BAMBOO_CHROMA_COLLECTION`` from the
+        environment at call time so that changes between test runs take effect
+        without restarting the process.
+
+        Returns:
+            ``None`` on success, or a human-readable error string if
+            initialisation failed (package missing, path absent, etc.).
+        """
+        if self._collection is not None:
+            return None
+
+        # --- import guard ---------------------------------------------------
+        try:
+            import chromadb  # type: ignore[import-untyped]  # optional dep
+        except ImportError:
+            return (
+                "ChromaDB is not installed.  "
+                "Install it with: pip install -r requirements-rag.txt"
+            )
+
+        chroma_path: str = os.getenv("BAMBOO_CHROMA_PATH", _DEFAULT_CHROMA_PATH)
+        collection_name: str = os.getenv(
+            "BAMBOO_CHROMA_COLLECTION", _DEFAULT_CHROMA_COLLECTION
+        )
+
+        # --- path guard -----------------------------------------------------
+        if not os.path.exists(chroma_path):
+            return (
+                f"ChromaDB path not found: '{chroma_path}'.  "
+                "Set BAMBOO_CHROMA_PATH to the directory created by the "
+                "ingestion script, or run the ingestion script first."
+            )
+
+        # --- connect --------------------------------------------------------
+        try:
+            self._client = chromadb.PersistentClient(path=chroma_path)
+            self._collection = self._client.get_collection(name=collection_name)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Reset so the next call retries rather than using a broken handle.
+            self._client = None
+            self._collection = None
+            return f"Failed to connect to ChromaDB collection '{collection_name}': {exc}"
+
+        return None
+
+    @staticmethod
+    def _format_results(
+        query: str,
+        results: dict[str, Any],
+        top_k: int,
+    ) -> str:
+        """Format raw ChromaDB query results into human-readable text.
+
+        Args:
+            query: The original search query (used in the header line).
+            results: Raw result mapping returned by ``Collection.query()``.
+            top_k: The requested number of results (used only for the header).
+
+        Returns:
+            str: Formatted multi-line string suitable for the MCP text payload.
+        """
+        documents: list[str] = (results.get("documents") or [[]])[0]
+        metadatas: list[dict[str, Any]] = (results.get("metadatas") or [[]])[0]
+        distances: list[float] = (results.get("distances") or [[]])[0]
+
+        if not documents:
+            return (
+                f"No results found for query: '{query}'.\n"
+                "The collection may be empty or the query may not match any documents."
+            )
+
+        lines: list[str] = [
+            f"PanDA Doc Search — top {min(len(documents), top_k)} result(s) for: '{query}'\n"
         ]
-        return text_content("AskPanDA Doc Search (dummy)\n\n" + "\n".join(hits))
+
+        for i, (doc, meta, dist) in enumerate(
+            zip(documents, metadatas, distances), start=1
+        ):
+            snippet = doc[:_SNIPPET_MAX_CHARS]
+            if len(doc) > _SNIPPET_MAX_CHARS:
+                snippet += " …"
+
+            source: str = ""
+            if meta:
+                source_val = meta.get("source") or meta.get("file") or ""
+                if source_val:
+                    source = f"  source : {source_val}\n"
+
+            score_pct = max(0.0, (1.0 - dist) * 100)
+
+            lines.append(
+                f"[{i}] score={score_pct:.1f}%  distance={dist:.4f}\n"
+                f"{source}"
+                f"  {snippet}\n"
+            )
+
+        return "\n".join(lines)
+
+    def _reset(self) -> None:
+        """Clear the cached client and collection.
+
+        Intended for use in tests to force re-initialisation with different
+        environment variables or mock objects.
+
+        Returns:
+            None
+        """
+        self._client = None
+        self._collection = None
 
 
 panda_doc_search_tool = PandaDocSearchTool()

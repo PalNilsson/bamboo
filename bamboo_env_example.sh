@@ -81,6 +81,16 @@ export ASKPANDA_OPENAI_COMPAT_BASE_URL=""
 export OPENAI_COMPAT_API_KEY=""
 
 ########################################
+# RAG / CHROMADB (panda_doc_search tool)
+########################################
+
+# Path to the ChromaDB persistent directory created by the ingestion script.
+export BAMBOO_CHROMA_PATH="./chroma_db"
+
+# Name of the ChromaDB collection to query.
+export BAMBOO_CHROMA_COLLECTION="document_monitor_agent"
+
+########################################
 # DEBUG / SAFETY
 ########################################
 

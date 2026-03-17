@@ -1,14 +1,16 @@
 """Bamboo answer tool — ATLAS-focused orchestration.
 
-Workflow
---------
-1. Extract a task ID from the question / message history.
-2. Call ``panda_task_status_tool`` to get structured evidence.
-3. Call ``bamboo_llm_answer_tool`` (LLM passthrough) with a prompt that
-   contains the original question and compact JSON evidence.
-4. Return a single MCP text content block.
-
-If no task ID is found the question is forwarded directly to the LLM.
+Routing (in priority order)
+----------------------------
+1. **Job log analysis** — job ID + analysis keywords → ``panda_log_analysis``
+   → LLM synthesis.
+2. **Job status** — bare job ID → ``panda_job_status`` → LLM synthesis.
+3. **Task status** — task ID → ``panda_task_status`` → LLM synthesis.
+4. **General / fallback** — no recognised ID → ``panda_doc_search`` (RAG)
+   → LLM synthesis.  The retrieved context is injected into the prompt so
+   the LLM answers from documentation rather than parametric memory.  If
+   the RAG tool is unavailable or returns no hits the LLM is still called
+   with a clear note that no documentation context was found.
 """
 from __future__ import annotations
 
@@ -18,6 +20,8 @@ from typing import Any
 
 from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, coerce_messages, text_content
+from bamboo.tools.doc_rag import panda_doc_search_tool
+from bamboo.tools.topic_guard import check_topic
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.task_status import panda_task_status_tool
 from bamboo.tools.job_status import panda_job_status_tool  # type: ignore[import-untyped]
@@ -257,6 +261,11 @@ class BambooAnswerTool:
             body = str(delegated[0].get("text", "")) if delegated and isinstance(delegated[0], dict) else str(delegated)
             return text_content(body)
 
+        # --- Topic guard — must run before any tool or LLM call ---
+        guard = await check_topic(question)
+        if not guard.allowed:
+            return text_content(guard.rejection_message)
+
         task_id = _extract_task_id(question)
         job_id = _extract_job_id(question)
         want_log_analysis = _is_log_analysis_request(question)
@@ -285,7 +294,7 @@ class BambooAnswerTool:
                 {"messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt_user},
-                ]}
+                ], "max_tokens": 2048}
             )
             body = str(delegated[0].get("text", "")) if delegated and isinstance(delegated[0], dict) else str(delegated)
             return text_content(body)
@@ -318,19 +327,84 @@ class BambooAnswerTool:
                 {"messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt_user},
-                ]}
+                ], "max_tokens": 2048}
             )
             body = str(delegated[0].get("text", "")) if delegated and isinstance(delegated[0], dict) else str(delegated)
             if raw_preview and "Raw response preview" not in body:
                 body = f"{body.rstrip()}\n\nRaw response preview:\n```text\n{raw_preview}\n```\n"
             return text_content(body)
 
-        # --- No recognised ID — forward directly to LLM ---
+        # --- No recognised ID — RAG first, then LLM synthesis ---
+        # This is the default path for general knowledge questions such as
+        # "What is PanDA?" or "How does brokerage work?".  We always attempt
+        # doc retrieval first; the LLM then synthesises an answer grounded in
+        # the retrieved context.  If RAG is unavailable or returns nothing the
+        # LLM is still called but is explicitly told no context was found, so
+        # it can answer from general knowledge while being transparent about it.
         if not task_id:
+            rag_context: str = ""
+            try:
+                rag_result = await panda_doc_search_tool.call(
+                    {"query": question, "top_k": 20}
+                )
+                if rag_result and isinstance(rag_result[0], dict):
+                    raw_text = str(rag_result[0].get("text", ""))
+                    # Treat error/empty messages from the tool as "no context".
+                    _no_context_signals = (
+                        "not installed",
+                        "not found",
+                        "failed to connect",
+                        "no results found",
+                        "required and must not be empty",
+                    )
+                    if not any(s in raw_text.lower() for s in _no_context_signals):
+                        rag_context = raw_text
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass  # RAG failure is non-fatal; we continue to LLM
+
+            if rag_context:
+                system = (
+                    "You are AskPanDA, an expert assistant for the PanDA workload management "
+                    "system and ATLAS experiment workflows at CERN.\n"
+                    "You are given a user question and relevant excerpts retrieved from the "
+                    "PanDA/Bamboo documentation knowledge base.\n"
+                    "Rules:\n"
+                    "- Base your answer primarily on the retrieved documentation excerpts.\n"
+                    "- If the excerpts fully answer the question, do not add unreferenced claims.\n"
+                    "- If the excerpts are only partially relevant, supplement with your general "
+                    "knowledge but clearly distinguish what comes from documentation vs. general "
+                    "knowledge.\n"
+                    "- Be concise and precise. Prefer bullet points for multi-part answers.\n"
+                    "- Do not fabricate PanDA-specific details (task IDs, queue names, error "
+                    "codes) that are not in the excerpts.\n"
+                )
+                prompt_user = (
+                    f"User question:\n{question}\n\n"
+                    f"Retrieved documentation excerpts:\n{rag_context}\n"
+                )
+            else:
+                system = (
+                    "You are AskPanDA, an expert assistant for the PanDA workload management "
+                    "system and ATLAS experiment workflows at CERN.\n"
+                    "No documentation excerpts were retrieved for this question (the knowledge "
+                    "base may be unavailable or the query returned no matches).\n"
+                    "Answer from your general knowledge, but be transparent that you are doing "
+                    "so and suggest the user consult the official PanDA documentation if "
+                    "precision is required.\n"
+                )
+                prompt_user = f"User question:\n{question}\n"
+
             delegated = await bamboo_llm_answer_tool.call(
-                {"messages": messages} if messages else {"question": question}
+                {"messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt_user},
+                ], "max_tokens": 2048}
             )
-            body = str(delegated[0].get("text", "")) if delegated and isinstance(delegated[0], dict) else str(delegated)
+            body = (
+                str(delegated[0].get("text", ""))
+                if delegated and isinstance(delegated[0], dict)
+                else str(delegated)
+            )
             return text_content(body)
 
         # --- Task status ---
@@ -405,10 +479,9 @@ class BambooAnswerTool:
                     for pid, st in zip(pandaids, statuses)
                 ]
                 tail = "\n  …(truncated)" if len(jobs_list) > 200 else ""
-                joined_rows = "\n".join(job_rows[:200])
                 job_context = (
                     f"\n\nJob list ({len(jobs_list)} jobs):\n"
-                    f"{joined_rows}{tail}"
+                    f"{"\n".join(job_rows[:200])}{tail}"
                 )
         else:
             evidence_for_prompt = evidence
@@ -424,7 +497,8 @@ class BambooAnswerTool:
             system += "\nInclude the raw BigPanDA response snippet verbatim at the end inside a fenced code block.\n"
 
         delegated = await bamboo_llm_answer_tool.call(
-            {"messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt_user}]}
+            {"messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt_user}],
+             "max_tokens": 2048}
         )
         body = str(delegated[0].get("text", "")) if delegated and isinstance(delegated[0], dict) else str(delegated)
 
