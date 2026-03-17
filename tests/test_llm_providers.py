@@ -25,7 +25,7 @@ from bamboo.llm.exceptions import (
     LLMRateLimitError,
     LLMTimeoutError,
 )
-from bamboo.llm.types import GenerateParams, ModelSpec
+from bamboo.llm.types import GenerateParams, Message, ModelSpec
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ def _params(temperature: float = 0.2, max_tokens: int | None = None) -> Generate
     return GenerateParams(temperature=temperature, max_tokens=max_tokens)
 
 
-_MESSAGES = [
+_MESSAGES: list[Message] = [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "What is PanDA?"},
 ]
@@ -413,7 +413,7 @@ class TestAnthropicClient:
         mock_anthropic = MagicMock()
         mock_anthropic.AsyncAnthropic.return_value = mock_client
 
-        system_only = [{"role": "system", "content": "You are helpful."}]
+        system_only: list[Message] = [{"role": "system", "content": "You are helpful."}]
 
         from bamboo.llm.providers.anthropic_client import AnthropicLLMClient
         client = AnthropicLLMClient(_spec("anthropic"))
