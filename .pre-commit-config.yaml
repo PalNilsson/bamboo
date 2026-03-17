@@ -23,3 +23,14 @@ repos:
         types_or: [python]
         stages: [pre-commit]
 
+      - id: pyright
+        name: pyright (type check)
+        entry: pyright
+        language: node
+        additional_dependencies:
+          - pyright@1.1.408
+        # pyright reads pyrightconfig.json and checks the whole project.
+        # pass_filenames must be false — per-file mode misses cross-file errors.
+        pass_filenames: false
+        types_or: [python]
+        stages: [pre-commit]

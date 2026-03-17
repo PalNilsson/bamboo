@@ -38,6 +38,43 @@ To inspect the server interactively using MCP Inspector:
 npx @modelcontextprotocol/inspector python3 -m bamboo.server
 ```
 
+## Textual TUI
+
+The preferred interface is a terminal UI built with [Textual](https://github.com/Textualize/textual).
+
+**Install dependencies:**
+```bash
+pip install -r requirements-textual.txt
+```
+
+**Launch (recommended — alternate screen):**
+```bash
+python interfaces/textual/chat.py --transport stdio --no-inline
+```
+
+**Launch (inline — stays in scrollback):**
+```bash
+python interfaces/textual/chat.py --transport stdio --inline
+```
+
+Type any question and press Enter. Slash commands:
+
+| Command | What it does |
+|---|---|
+| `/help` | Show all commands |
+| `/task <id>` | Shorthand for "summarise task \<id\>" |
+| `/tracing` | Show timing and trace spans for the last request |
+| `/json` | Show raw BigPanDA JSON for the last task query |
+| `/debug on\|off` | Toggle verbose tool call output |
+| `/tools` | List tools registered on the server |
+| `/clear` | Clear the transcript |
+| `/exit` | Quit |
+
+Keyboard: `PageUp`/`PageDown` to scroll, `Ctrl+Q` to quit.
+Copy text by holding **Option** (macOS) or **Shift** (Linux/Windows) while selecting with the mouse.
+
+See [docs/interfaces.md](docs/interfaces.md) for HTTP transport, inline vs no-inline details, and the Streamlit web UI.
+
 ## Documentation
 
 - [Developer guide](docs/developer.md)
