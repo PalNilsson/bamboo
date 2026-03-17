@@ -44,6 +44,7 @@ from bamboo.llm.runtime import set_llm_manager, set_llm_selector
 
 from bamboo.tools.health import bamboo_health_tool
 from bamboo.tools.doc_rag import panda_doc_search_tool
+from bamboo.tools.doc_bm25 import panda_doc_bm25_tool
 from bamboo.tools.queue_info import panda_queue_info_tool
 from bamboo.tools.task_status import panda_task_status_tool
 from bamboo.tools.job_status import panda_job_status_tool  # type: ignore[import-untyped]
@@ -64,6 +65,7 @@ TOOLS = {
     "bamboo_answer": bamboo_answer_tool,
     "bamboo_plan": bamboo_plan_tool,
     "panda_doc_search": panda_doc_search_tool,
+    "panda_doc_bm25": panda_doc_bm25_tool,
     "panda_queue_info": panda_queue_info_tool,
     "panda_task_status": panda_task_status_tool,
     "panda_job_status": panda_job_status_tool,

@@ -50,9 +50,11 @@ async def test_general_question_calls_rag_then_llm():
     rag_mock = _rag_mock(rag_text)
     llm_mock = _llm_mock(llm_reply)
 
+    bm25_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA Doc BM25 …"}])
     tool = BambooAnswerTool()
     with (
         patch.object(ba_mod, "panda_doc_search_tool", AsyncMock(call=rag_mock)),
+        patch.object(ba_mod, "panda_doc_bm25_tool", AsyncMock(call=bm25_mock)),
         patch.object(ba_mod, "bamboo_llm_answer_tool", AsyncMock(call=llm_mock)),
     ):
         result = await tool.call({"question": "What is PanDA?"})
@@ -61,7 +63,7 @@ async def test_general_question_calls_rag_then_llm():
     rag_mock.assert_awaited_once()
     call_args = rag_mock.call_args[0][0]
     assert call_args["query"] == "What is PanDA?"
-    assert call_args["top_k"] == 5
+    assert call_args["top_k"] == 20
 
     # LLM must have been called; its reply is returned verbatim.
     llm_mock.assert_awaited_once()
@@ -85,9 +87,11 @@ async def test_general_question_rag_unavailable_falls_back_gracefully():
     rag_mock = _rag_mock(rag_text)
     llm_mock = _llm_mock(llm_reply)
 
+    bm25_mock = AsyncMock(return_value=[{"type": "text", "text": "ChromaDB is not installed."}])
     tool = BambooAnswerTool()
     with (
         patch.object(ba_mod, "panda_doc_search_tool", AsyncMock(call=rag_mock)),
+        patch.object(ba_mod, "panda_doc_bm25_tool", AsyncMock(call=bm25_mock)),
         patch.object(ba_mod, "bamboo_llm_answer_tool", AsyncMock(call=llm_mock)),
     ):
         result = await tool.call({"question": "What is PanDA?"})
@@ -98,7 +102,7 @@ async def test_general_question_rag_unavailable_falls_back_gracefully():
     # System prompt should NOT say "retrieved excerpts" — it's the no-context variant.
     llm_call_msgs = llm_mock.call_args[0][0]["messages"]
     system_msg = next(m for m in llm_call_msgs if m["role"] == "system")
-    assert "no documentation excerpts" in system_msg["content"].lower()
+    assert "did not contain" in system_msg["content"].lower() or "not contain" in system_msg["content"].lower()
 
     assert result[0]["type"] == "text"
     assert llm_reply in result[0]["text"]

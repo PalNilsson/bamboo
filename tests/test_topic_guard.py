@@ -190,10 +190,12 @@ async def test_bamboo_answer_passes_ontopic_through_guard():
     rag_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA Doc Search …\n[1] …"}])
     llm_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA is the workload manager."}])
 
+    bm25_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA Doc BM25 …"}])
     tool = BambooAnswerTool()
     with (
         patch.object(ba_mod, "check_topic", guard_mock),
         patch.object(ba_mod, "panda_doc_search_tool", AsyncMock(call=rag_mock)),
+        patch.object(ba_mod, "panda_doc_bm25_tool", AsyncMock(call=bm25_mock)),
         patch.object(ba_mod, "bamboo_llm_answer_tool", AsyncMock(call=llm_mock)),
     ):
         result = await tool.call({"question": "What is PanDA?"})

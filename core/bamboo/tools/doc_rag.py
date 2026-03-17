@@ -51,6 +51,7 @@ class PandaDocSearchTool:
     """
 
     def __init__(self) -> None:
+        """Initialise the tool with no active ChromaDB client or collection."""
         self._client: Any = None
         self._collection: Any = None
 

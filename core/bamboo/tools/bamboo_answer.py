@@ -21,6 +21,7 @@ from typing import Any
 from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, coerce_messages, text_content
 from bamboo.tools.doc_rag import panda_doc_search_tool
+from bamboo.tools.doc_bm25 import panda_doc_bm25_tool
 from bamboo.tools.topic_guard import check_topic
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.task_status import panda_task_status_tool
@@ -344,23 +345,51 @@ class BambooAnswerTool:
         if not task_id:
             rag_context: str = ""
             try:
-                rag_result = await panda_doc_search_tool.call(
-                    {"query": question, "top_k": 20}
+                import asyncio as _asyncio
+                # Run vector search and BM25 search concurrently.
+                _vec_result, _bm25_result = await _asyncio.gather(
+                    panda_doc_search_tool.call({"query": question, "top_k": 20}),
+                    panda_doc_bm25_tool.call({"query": question, "top_k": 10}),
+                    return_exceptions=True,
                 )
-                if rag_result and isinstance(rag_result[0], dict):
-                    raw_text = str(rag_result[0].get("text", ""))
-                    # Treat error/empty messages from the tool as "no context".
-                    _no_context_signals = (
-                        "not installed",
-                        "not found",
-                        "failed to connect",
-                        "no results found",
-                        "required and must not be empty",
+
+                _no_context_signals = (
+                    "not installed",
+                    "chromadb path not found",
+                    "failed to connect",
+                    "no results found",
+                    "no keyword matches",
+                    "required and must not be empty",
+                )
+
+                def _extract_context(result: object) -> str:
+                    """Return text from a tool result if it contains useful context."""
+                    if isinstance(result, Exception) or not result:
+                        return ""
+                    if not isinstance(result, list) or not isinstance(result[0], dict):
+                        return ""
+                    text = str(result[0].get("text", ""))
+                    first_line = text.split("\n")[0].lower()
+                    if any(s in first_line for s in _no_context_signals):
+                        return ""
+                    return text
+
+                _vec_context = _extract_context(_vec_result)
+                _bm25_context = _extract_context(_bm25_result)
+
+                # Merge: vector results first (conceptual), BM25 second
+                # (keyword/exact-match) so the LLM draws from both.
+                if _vec_context and _bm25_context:
+                    rag_context = (
+                        f"{_vec_context}\n\n"
+                        f"--- Keyword search results ---\n{_bm25_context}"
                     )
-                    if not any(s in raw_text.lower() for s in _no_context_signals):
-                        rag_context = raw_text
+                elif _vec_context:
+                    rag_context = _vec_context
+                elif _bm25_context:
+                    rag_context = _bm25_context
             except Exception:  # pylint: disable=broad-exception-caught
-                pass  # RAG failure is non-fatal; we continue to LLM
+                pass  # Search failure is non-fatal; we continue to LLM
 
             if rag_context:
                 system = (
@@ -386,11 +415,16 @@ class BambooAnswerTool:
                 system = (
                     "You are AskPanDA, an expert assistant for the PanDA workload management "
                     "system and ATLAS experiment workflows at CERN.\n"
-                    "No documentation excerpts were retrieved for this question (the knowledge "
-                    "base may be unavailable or the query returned no matches).\n"
-                    "Answer from your general knowledge, but be transparent that you are doing "
-                    "so and suggest the user consult the official PanDA documentation if "
-                    "precision is required.\n"
+                    "No relevant documentation excerpts were found for this question.\n"
+                    "Rules:\n"
+                    "- Do NOT answer from general knowledge or make up any PanDA-specific "
+                    "details such as error codes, queue names, or configuration values.\n"
+                    "- Tell the user that the documentation knowledge base did not contain "
+                    "enough information to answer this question reliably.\n"
+                    "- Suggest they consult the official PanDA documentation or BigPanDA "
+                    "monitor directly.\n"
+                    "- If you can point to a plausible documentation URL or resource name, "
+                    "do so — but do not invent specific technical values.\n"
                 )
                 prompt_user = f"User question:\n{question}\n"
 

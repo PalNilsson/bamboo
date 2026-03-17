@@ -1,3 +1,5 @@
-# ChromaDB vector store — required for the panda_doc_search RAG tool.
+# ChromaDB vector store and BM25 keyword search — required for the
+# panda_doc_search and panda_doc_bm25 RAG tools.
 # Install with: pip install -r requirements-rag.txt
 chromadb>=0.4.0
+rank_bm25>=0.2.2
