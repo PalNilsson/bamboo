@@ -34,12 +34,26 @@ def _make_chroma_module(docs: list[str], ids: list[str]) -> types.ModuleType:
     return mod
 
 
+class _FakeScores:
+    """Minimal stand-in for a numpy array with a .tolist() method."""
+
+    def __init__(self, scores: list[float]) -> None:
+        self._scores = scores
+
+    def tolist(self) -> list[float]:
+        """Return scores as a plain Python list."""
+        return self._scores
+
+    def __iter__(self):
+        """Support iteration over scores."""
+        return iter(self._scores)
+
+
 def _make_bm25_module(scores: list[float]) -> types.ModuleType:
     """Build a minimal fake rank_bm25 module returning the given scores."""
-    import numpy as np
     mod = types.ModuleType("rank_bm25")
     bm25 = MagicMock()
-    bm25.get_scores.return_value = np.array(scores)
+    bm25.get_scores.return_value = _FakeScores(scores)
     mod.BM25Okapi = MagicMock(return_value=bm25)  # type: ignore[attr-defined]
     return mod
 
