@@ -2,50 +2,69 @@ sequenceDiagram
     autonumber
     actor User
     participant UI as Interface
-    participant MCP as MCP Server
-    participant EXT as Arg Extractor
-    participant RTR as Router
-    participant LDR as Loader
-    participant PLN as Planner LLM
-    participant TOOL as Tool
-    participant UP as Upstream
-    participant SUM as Summarizer LLM
+    participant MCP as MCP Server (core.py)
+    participant BA as bamboo_answer
+    participant GUARD as Topic Guard
+    participant TOOL as Tool (task/job/rag/log)
+    participant UP as Upstream (BigPanDA/ChromaDB)
+    participant SUM as Synthesiser LLM
 
-    User->>UI: Ask a question
-    UI->>MCP: POST /mcp/tools/call (query, namespace?)
+    User->>UI: Ask a question (+ optional history)
+    Note over UI: stdio or HTTP transport<br/>(JSON-RPC 2.0)
+    UI->>MCP: tools/call bamboo_answer<br/>{question, messages?, bypass_routing?}
 
-    MCP->>EXT: Extract hints
-    EXT-->>MCP: hints (task_id/job_id/site/...) 
-    MCP->>RTR: Choose routing mode
-
-    alt Fast-path (deterministic)
-        RTR-->>MCP: tool_name + arguments
-    else Planner (conditional)
-        RTR-->>MCP: Need planning
-        MCP->>LDR: List/resolve available tools
-        LDR-->>MCP: Tool catalog (name, description, schema)
-        MCP->>PLN: Plan(question, hints, tools, plan_schema)
-        PLN-->>MCP: Plan JSON
-        MCP->>RTR: Validate plan
-        RTR-->>MCP: tool_calls[]
+    MCP->>MCP: _validate_arguments(inputSchema)
+    alt Validation fails
+        MCP-->>UI: text_content(error message)
     end
 
-    loop For each tool call
-        MCP->>LDR: Resolve tool implementation
-        LDR-->>MCP: Resolved tool
-        MCP->>TOOL: Validate args vs inputSchema
-        MCP->>TOOL: call(arguments)
-        TOOL->>UP: Query upstream service
-        UP-->>TOOL: Structured data
-        TOOL-->>MCP: {text, evidence}
+    MCP->>BA: call({question, messages, ...})
+
+    BA->>BA: Extract history from messages
+    BA->>BA: Extract question from last user turn
+
+    alt bypass_routing = true
+        BA->>SUM: bamboo_llm_answer(messages)
+        SUM-->>BA: list[MCPContent]
+        BA-->>MCP: list[MCPContent]
+    else Normal routing
+        BA->>GUARD: check_topic(question)
+        alt Topic rejected
+            GUARD-->>BA: GuardResult(allowed=False)
+            BA-->>MCP: text_content(rejection_message)
+        end
+        GUARD-->>BA: GuardResult(allowed=True)
+
+        BA->>BA: Extract task_id / job_id from question
+
+        alt job + analysis keywords → log analysis
+            BA->>TOOL: panda_log_analysis.call({job_id})
+            TOOL->>UP: bigpanda-downloader MCP tool
+            UP-->>TOOL: raw log + metadata
+            TOOL-->>BA: text_content(json.dumps({evidence}))
+        else job_id only → job status
+            BA->>TOOL: panda_job_status.call({job_id})
+            TOOL->>UP: bigpanda-downloader MCP tool
+            UP-->>TOOL: job metadata JSON
+            TOOL-->>BA: text_content(json.dumps({evidence}))
+        else task_id → task status
+            BA->>TOOL: panda_task_status.call({task_id})
+            TOOL->>UP: BigPanDA HTTP API
+            UP-->>TOOL: task + job JSON
+            TOOL-->>BA: text_content(json.dumps({evidence}))
+        else no ID → RAG (vector + BM25, concurrent)
+            BA->>TOOL: panda_doc_search + panda_doc_bm25 (parallel)
+            TOOL->>UP: ChromaDB
+            UP-->>TOOL: document chunks
+            TOOL-->>BA: text_content(doc excerpts)
+        end
+
+        Note over BA: _unpack_tool_result() deserialises<br/>JSON evidence from list[MCPContent]
+
+        BA->>SUM: bamboo_llm_answer<br/>(system + history + synthesised user prompt)
+        SUM-->>BA: list[MCPContent] (answer text)
+        BA-->>MCP: list[MCPContent]
     end
 
-    alt Summarization enabled
-        MCP->>SUM: Summarize(question + evidence)
-        SUM-->>MCP: answer_text
-        MCP-->>UI: answer_text + evidence
-    else Summarization disabled
-        MCP-->>UI: tool text + evidence
-    end
-
-    UI-->>User: Render answer (+ evidence/debug)
+    MCP-->>UI: list[MCPContent]
+    UI-->>User: Render answer (+ /json, /tracing, /history debug)
