@@ -14,6 +14,7 @@ import logging
 from typing import Any
 
 from bamboo.tools._mcp_caller import get_mcp_caller  # type: ignore[import-untyped]
+from bamboo.tools.base import MCPContent, text_content
 
 logger = logging.getLogger(__name__)
 
@@ -100,27 +101,32 @@ class PandaJobStatusTool:
         """
         return self._def
 
-    async def call(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:
         """Fetch job metadata and return structured evidence.
+
+        The result is a one-element ``list[MCPContent]`` whose ``text`` field
+        contains the JSON-serialised evidence dict.  Callers that need the raw
+        evidence should parse ``json.loads(result[0]["text"])``.  This keeps
+        the tool compliant with the MCP narrow-waist contract.
 
         Args:
             arguments: Dict with required ``job_id`` and optional ``query``.
 
         Returns:
-            Dict with ``evidence`` (structured metadata) and ``text``
-            (short human-readable summary).
+            One-element MCP content list containing the JSON-serialised
+            evidence and text summary.
         """
         if not isinstance(arguments, dict):
-            return {"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}
+            return text_content(json.dumps({"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}))
 
         job_id = arguments.get("job_id")
         if job_id is None:
-            return {"evidence": {"error": "missing job_id", "provided": arguments}}
+            return text_content(json.dumps({"evidence": {"error": "missing job_id", "provided": arguments}}))
 
         try:
             job_id_int = int(job_id)
         except Exception:  # pylint: disable=broad-exception-caught
-            return {"evidence": {"error": "job_id must be an integer", "provided": arguments}}
+            return text_content(json.dumps({"evidence": {"error": "job_id must be an integer", "provided": str(arguments)}}))
 
         monitor_url = f"https://bigpanda.cern.ch/job?pandaid={job_id_int}"
         base_evidence: dict[str, Any] = {
@@ -137,10 +143,10 @@ class PandaJobStatusTool:
 
         if result["error"]:
             base_evidence["error"] = result["error"]
-            return {
+            return text_content(json.dumps({
                 "evidence": base_evidence,
                 "text": f"Failed to fetch metadata for job {job_id_int}: {result['error']}",
-            }
+            }))
 
         raw_text: str = result["text"] or ""
 
@@ -149,30 +155,30 @@ class PandaJobStatusTool:
         if json_start < 0:
             base_evidence["error"] = "No JSON found in response"
             base_evidence["raw"] = raw_text[:500]
-            return {
+            return text_content(json.dumps({
                 "evidence": base_evidence,
                 "text": f"Unexpected response format for job {job_id_int}.",
-            }
+            }))
 
         try:
             data: dict[str, Any] = json.loads(raw_text[json_start:])
         except json.JSONDecodeError as e:
             base_evidence["error"] = f"JSON parse error: {e}"
             base_evidence["raw"] = raw_text[:500]
-            return {
+            return text_content(json.dumps({
                 "evidence": base_evidence,
                 "text": f"Could not parse metadata for job {job_id_int}.",
-            }
+            }))
 
         job: dict[str, Any] = data.get("job") or {}
         files: list[dict[str, Any]] = data.get("files") or []
 
         if not job:
             base_evidence["not_found"] = True
-            return {
+            return text_content(json.dumps({
                 "evidence": base_evidence,
                 "text": f"Job {job_id_int} was not found in BigPanDA.",
-            }
+            }))
 
         evidence: dict[str, Any] = {
             **base_evidence,
@@ -213,7 +219,7 @@ class PandaJobStatusTool:
         summary = f"Job {job_id_int} status: {status}."
         if evidence.get("taskbuffererrordiag"):
             summary += f" Reason: {evidence['taskbuffererrordiag']}."
-        return {"evidence": evidence, "text": summary}
+        return text_content(json.dumps({"evidence": evidence, "text": summary}))
 
 
 panda_job_status_tool = PandaJobStatusTool()

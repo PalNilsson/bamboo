@@ -17,6 +17,8 @@ endtime, dsinfo, datasets_summary, job_counts, payload (full JSON).
 """
 from __future__ import annotations
 
+import json
+
 import asyncio
 import logging
 from typing import Any
@@ -27,6 +29,7 @@ from askpanda_atlas._fallback_http import (
     get_base_url,
     job_counts_from_payload,
 )
+from bamboo.tools.base import MCPContent, text_content
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +59,7 @@ def get_definition() -> dict[str, Any]:
                 "timeout": {"type": "integer", "description": "HTTP timeout in seconds (default 30)"},
             },
             "required": ["task_id"],
-            "additionalProperties": True,
+            "additionalProperties": False,
         },
         "examples": [{"task_id": 48432100, "query": "What happened to task 48432100?"}],
         "tags": ["atlas", "panda", "bigpanda", "monitoring"],
@@ -78,30 +81,33 @@ class PandaTaskStatusTool:
         """
         return self._def
 
-    async def call(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:
         """Fetch task status and return structured evidence.
+
+        The result is a one-element ``list[MCPContent]`` whose ``text`` field
+        contains the JSON-serialised evidence dict.  Callers that need the raw
+        evidence should parse ``json.loads(result[0]["text"])``.  This keeps
+        the tool compliant with the MCP narrow-waist contract.
 
         Args:
             arguments: Dict with required ``task_id`` (int) and optional
                 ``query`` (str), ``include_jobs`` (bool), ``timeout`` (int).
 
         Returns:
-            A dict with an ``evidence`` key containing structured task
-            metadata, and a ``text`` key with a short human-readable
-            summary. On error, ``evidence`` will contain an ``error``
-            key describing the failure.
+            One-element MCP content list containing the JSON-serialised
+            evidence and text summary.
         """
         if not isinstance(arguments, dict):
-            return {"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}
+            return text_content(json.dumps({"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}))
 
         task_id = arguments.get("task_id")
         if task_id is None:
-            return {"evidence": {"error": "missing task_id", "provided": arguments}}
+            return text_content(json.dumps({"evidence": {"error": "missing task_id", "provided": str(arguments)}}))
 
         try:
             task_id_int = int(task_id)
         except Exception:  # pylint: disable=broad-exception-caught
-            return {"evidence": {"error": "task_id must be an integer", "provided": arguments}}
+            return text_content(json.dumps({"evidence": {"error": "task_id must be an integer", "provided": str(arguments)}}))
 
         include_jobs: bool = bool(arguments.get("include_jobs", True))
 
@@ -120,7 +126,7 @@ class PandaTaskStatusTool:
                 fetch_jsonish, json_url, timeout
             )
         except Exception as e:  # pylint: disable=broad-exception-caught
-            return {
+            return text_content(json.dumps({
                 "evidence": {
                     "task_id": task_id_int,
                     "monitor_url": monitor_url,
@@ -128,7 +134,7 @@ class PandaTaskStatusTool:
                     "error": repr(e),
                 },
                 "text": f"Failed to fetch task {task_id_int} metadata (network error).",
-            }
+            }))
 
         # Non-JSON or HTTP error
         if payload is None:
@@ -160,7 +166,7 @@ class PandaTaskStatusTool:
                 msg = f"BigPanDA returned HTTP {http_status} when fetching task {task_id_int}."
             else:
                 msg = f"BigPanDA returned a non-JSON response for task {task_id_int}."
-            return {"evidence": evidence, "text": msg}
+            return text_content(json.dumps({"evidence": evidence, "text": msg}))
 
         # Extract common task fields
         task: dict[str, Any] = payload.get("task", {}) if isinstance(payload.get("task"), dict) else {}
@@ -190,7 +196,7 @@ class PandaTaskStatusTool:
             if status
             else f"Task {task_id_int} metadata fetched."
         )
-        return {"evidence": evidence, "text": summary}
+        return text_content(json.dumps({"evidence": evidence, "text": summary}))
 
 
 panda_task_status_tool = PandaTaskStatusTool()

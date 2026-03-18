@@ -141,6 +141,54 @@ def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:
     return defs
 
 
+def _validate_arguments(
+    tool_def: dict[str, Any], arguments: dict[str, Any]
+) -> str | None:
+    """Validate ``arguments`` against a tool's ``inputSchema``.
+
+    Performs lightweight structural validation — sufficient to catch missing
+    required fields and unknown extra keys — without pulling in a full
+    JSON Schema library.  The MCP SDK does not validate arguments on ingress,
+    so this is the only gate between client input and tool business logic.
+
+    Args:
+        tool_def: Tool definition dict as returned by ``get_definition()``.
+        arguments: Argument mapping supplied by the client.
+
+    Returns:
+        A human-readable error string if validation fails, or ``None`` if the
+        arguments are valid.
+    """
+    schema: dict[str, Any] = tool_def.get("inputSchema", {})
+    props: dict[str, Any] = schema.get("properties", {})
+
+    # Check anyOf (e.g. question OR messages required)
+    any_of: list[dict[str, Any]] = schema.get("anyOf", [])
+    if any_of:
+        satisfied = any(
+            all(arguments.get(k) for k in branch.get("required", []))
+            for branch in any_of
+        )
+        if not satisfied:
+            branches = " or ".join(
+                str(b.get("required", [])) for b in any_of
+            )
+            return f"One of {branches} must be provided."
+
+    # Check required fields
+    for field in schema.get("required", []):
+        if field not in arguments or arguments[field] is None:
+            return f"Required argument missing: '{field}'."
+
+    # Check additionalProperties: false
+    if schema.get("additionalProperties") is False and props:
+        extra = sorted(set(arguments) - set(props))
+        if extra:
+            return f"Unexpected argument(s): {extra}. Allowed: {sorted(props)}."
+
+    return None
+
+
 def create_server() -> Server:  # pylint: disable=too-complex  # noqa: C901
     """Create and configure the MCP Server instance.
 
@@ -227,6 +275,14 @@ def create_server() -> Server:  # pylint: disable=too-complex  # noqa: C901
                         args_keys=sorted((arguments or {}).keys())):
             tool: Any | None = TOOLS.get(name)
             if tool is not None:
+                get_def_fn = getattr(tool, "get_definition", None)
+                if callable(get_def_fn):
+                    raw_def = get_def_fn()
+                    tool_def: dict[str, Any] = raw_def if isinstance(raw_def, dict) else {}
+                    err = _validate_arguments(tool_def, arguments or {})
+                    if err:
+                        from bamboo.tools.base import text_content as _tc  # local import avoids cycle
+                        return _tc(f"Invalid arguments for tool '{name}': {err}")
                 return await tool.call(arguments or {})
 
             # Fallback: resolve tool from plugin entry points.

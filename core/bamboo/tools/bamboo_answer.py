@@ -192,6 +192,33 @@ def _extract_delegated_text(delegated: Any) -> str:
     return str(delegated)
 
 
+def _unpack_tool_result(result: list[MCPContent]) -> dict[str, Any]:
+    """Deserialise a JSON-wrapped MCPContent result from an internal tool.
+
+    Internal tools (job_status, log_analysis, task_status) return a
+    one-element ``list[MCPContent]`` whose ``text`` field contains the
+    JSON-serialised ``{evidence, text}`` dict.  This helper unpacks that
+    layer so callers can access ``result.get("evidence", ...)`` as before.
+
+    Falls back to an empty dict if the result cannot be parsed, so callers
+    always receive a dict regardless of upstream errors.
+
+    Args:
+        result: Raw return value from an internal tool ``call()`` method.
+
+    Returns:
+        Deserialised dict, or ``{}`` on parse failure.
+    """
+    try:
+        if result and isinstance(result[0], dict):
+            text = result[0].get("text", "")
+            if isinstance(text, str) and text.strip().startswith("{"):
+                return json.loads(text)  # type: ignore[no-any-return]
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    return {}
+
+
 async def _call_llm(
     system: str,
     user: str,
@@ -487,6 +514,10 @@ class BambooAnswerTool:
             ),
             "inputSchema": {
                 "type": "object",
+                "anyOf": [
+                    {"required": ["question"]},
+                    {"required": ["messages"]}
+                ],
                 "properties": {
                     "question": {
                         "type": "string",
@@ -520,6 +551,7 @@ class BambooAnswerTool:
                         "description": "If true, include a raw response preview in error output.",
                     },
                 },
+                "additionalProperties": False,
             },
         }
 
@@ -636,11 +668,12 @@ class BambooAnswerTool:
         Returns:
             List[MCPContent]: One-element MCP text content list.
         """
-        tool_result = await panda_log_analysis_tool.call({
+        raw_result = await panda_log_analysis_tool.call({
             "job_id": job_id,
             "query": question,
             "context": "",
         })
+        tool_result = _unpack_tool_result(raw_result)
         evidence = tool_result.get("evidence", tool_result)
         system = (
             "You are AskPanDA for the ATLAS experiment.\n"
@@ -672,10 +705,11 @@ class BambooAnswerTool:
         Returns:
             List[MCPContent]: One-element MCP text content list.
         """
-        tool_result = await panda_job_status_tool.call({
+        raw_result = await panda_job_status_tool.call({
             "job_id": job_id,
             "query": question,
         })
+        tool_result = _unpack_tool_result(raw_result)
         evidence = tool_result.get("evidence", tool_result)
         is_error = _is_bigpanda_error(evidence)
         raw_preview = _extract_raw_preview(tool_result, evidence) if is_error and include_raw else None
@@ -774,11 +808,12 @@ class BambooAnswerTool:
         Returns:
             List[MCPContent]: One-element MCP text content list.
         """
-        tool_result = await panda_task_status_tool.call({
+        raw_result = await panda_task_status_tool.call({
             "task_id": task_id,
             "query": question,
             "include_jobs": include_jobs,
         })
+        tool_result = _unpack_tool_result(raw_result)
         evidence = tool_result.get("evidence", tool_result)
         is_error = _is_bigpanda_error(evidence)
         raw_preview = _extract_raw_preview(tool_result, evidence) if is_error else None

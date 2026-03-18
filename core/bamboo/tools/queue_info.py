@@ -36,6 +36,7 @@ class PandaQueueInfoTool:
                     "site": {"type": "string", "description": "Site name, e.g. BNL-ATLAS"},
                 },
                 "required": ["site"],
+                "additionalProperties": False,
             },
         }
 

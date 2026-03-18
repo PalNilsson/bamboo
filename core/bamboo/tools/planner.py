@@ -336,6 +336,7 @@ class BambooPlannerTool:
                     "max_tokens": {"type": "integer", "default": 900, "description": "Max completion tokens."},
                 },
                 "required": ["question"],
+                "additionalProperties": False,
             },
         }
 
@@ -395,7 +396,15 @@ class BambooPlannerTool:
             try:
                 plan = Plan.model_validate_json(extract_first_json_object(text2))
             except Exception as e2:  # pylint: disable=broad-exception-caught
-                raise ValueError(f"Planner output did not validate after repair attempt: {e2}") from e2
+                # Tools must never raise — return a structured error response.
+                return text_content(json.dumps({
+                    "error": "planner_parse_failure",
+                    "message": (
+                        "The LLM planner did not return a valid JSON plan after "
+                        f"two attempts. Last error: {str(e2)[:300]}"
+                    ),
+                    "raw_output": text2[:500],
+                }))
 
         # Pydantic's JSON helpers intentionally limit json.dumps kwargs.
         # Use model_dump() + json.dumps to keep Unicode readable.

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from typing import Any, cast
 
 from bamboo.tools.base import text_content
 
@@ -101,6 +101,7 @@ class PandaDocBM25Tool:
                     },
                 },
                 "required": ["query"],
+                "additionalProperties": False,
             },
         }
 
@@ -232,7 +233,7 @@ class PandaDocBM25Tool:
                 )
                 all_docs.extend(batch["documents"] or [])
                 all_ids.extend(batch["ids"] or [])
-                all_metas.extend(batch["metadatas"] or [{}] * len(batch["ids"]))
+                all_metas.extend(cast(list[dict[str, Any]], batch["metadatas"] or [{}] * len(batch["ids"])))
                 offset += batch_size
 
             self._docs = all_docs

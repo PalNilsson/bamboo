@@ -6,6 +6,22 @@ from unittest.mock import AsyncMock
 from bamboo.tools.job_status import panda_job_status_tool
 
 
+def _unpack(result):
+    """Deserialise the JSON-wrapped MCPContent returned by the tool.
+
+    Tools now return list[MCPContent] with a JSON-encoded evidence dict
+    in the text field.  This helper unwraps that for test assertions.
+
+    Args:
+        result: Return value of tool.call().
+
+    Returns:
+        Deserialised dict with ``evidence`` and ``text`` keys.
+    """
+    import json as _json
+    return _json.loads(result[0]["text"])
+
+
 SAMPLE_JOB = {
     "pandaid": 6837798305,
     "jobstatus": "closed",
@@ -50,20 +66,22 @@ def test_job_status_success(monkeypatch):
     """Test successful job metadata fetch and evidence extraction."""
     monkeypatch.setattr("bamboo.tools.job_status.get_mcp_caller", lambda: _make_caller(text=SAMPLE_RESPONSE))
     result = asyncio.run(panda_job_status_tool.call({"job_id": 6837798305}))
-    ev = result["evidence"]
+    res = _unpack(result)
+    ev = res["evidence"]
     assert ev["job_id"] == 6837798305
     assert ev["jobstatus"] == "closed"
     assert ev["computingsite"] == "ROMANIA07_HTCondor"
     assert ev["taskbuffererrordiag"] == "reassigned by JEDI"
     assert ev["jeditaskid"] == 46703290
-    assert "reassigned by JEDI" in result["text"]
+    assert "reassigned by JEDI" in res["text"]
 
 
 def test_job_status_files_summary(monkeypatch):
     """Test that files_summary correctly counts types and statuses."""
     monkeypatch.setattr("bamboo.tools.job_status.get_mcp_caller", lambda: _make_caller(text=SAMPLE_RESPONSE))
     result = asyncio.run(panda_job_status_tool.call({"job_id": 6837798305}))
-    fs = result["evidence"]["files_summary"]
+    res = _unpack(result)
+    fs = res["evidence"]["files_summary"]
     assert fs["total"] == 3
     assert fs["by_type"]["input"] == 1
     assert fs["by_type"]["output"] == 1
@@ -76,20 +94,21 @@ def test_job_status_mcp_error(monkeypatch):
     monkeypatch.setattr("bamboo.tools.job_status.get_mcp_caller",
                         lambda: _make_caller(error="Server not connected"))
     result = asyncio.run(panda_job_status_tool.call({"job_id": 9999}))
-    assert "error" in result["evidence"]
-    assert "Server not connected" in result["text"]
+    res = _unpack(result)
+    assert "error" in res["evidence"]
+    assert "Server not connected" in res["text"]
 
 
 def test_job_status_missing_job_id():
     """Test validation when job_id is missing."""
     result = asyncio.run(panda_job_status_tool.call({}))
-    assert result["evidence"]["error"] == "missing job_id"
+    assert _unpack(result)["evidence"]["error"] == "missing job_id"
 
 
 def test_job_status_invalid_job_id():
     """Test validation when job_id is not an integer."""
     result = asyncio.run(panda_job_status_tool.call({"job_id": "notanint"}))
-    assert "integer" in result["evidence"]["error"]
+    assert "integer" in _unpack(result)["evidence"]["error"]
 
 
 def test_job_status_not_found(monkeypatch):
@@ -97,7 +116,7 @@ def test_job_status_not_found(monkeypatch):
     empty = "Job 9999 metadata:\n\n" + json.dumps({"files": [], "dsfiles": []})
     monkeypatch.setattr("bamboo.tools.job_status.get_mcp_caller", lambda: _make_caller(text=empty))
     result = asyncio.run(panda_job_status_tool.call({"job_id": 9999}))
-    assert result["evidence"].get("not_found") is True
+    assert _unpack(result)["evidence"].get("not_found") is True
 
 
 def test_get_definition():

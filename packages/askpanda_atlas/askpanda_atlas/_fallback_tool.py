@@ -5,6 +5,7 @@ Used only when ``askpanda_atlas.task_status_impl`` is not importable.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from ._fallback_http import (
@@ -13,6 +14,18 @@ from ._fallback_http import (
     get_base_url,
     job_counts_from_payload,
 )
+
+
+def _text_content(data: dict) -> list[dict]:
+    """Wrap a dict as a JSON-serialised MCP text content item.
+
+    Args:
+        data: Dict to serialise.
+
+    Returns:
+        One-element MCP content list.
+    """
+    return [{"type": "text", "text": json.dumps(data)}]
 
 
 def get_definition() -> dict[str, Any]:
@@ -38,7 +51,7 @@ def get_definition() -> dict[str, Any]:
                 },
             },
             "required": ["task_id"],
-            "additionalProperties": True,
+            "additionalProperties": False,
         },
         "examples": [{"task_id": 48432100, "query": "What happened to task 48432100?"}],
         "tags": ["atlas", "panda", "bigpanda", "monitoring"],
@@ -56,24 +69,28 @@ class FallbackTaskStatusTool:
         """Return the MCP tool definition."""
         return self._def
 
-    async def call(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call(self, arguments: dict[str, Any]) -> list[dict]:
         """Fetch task status and return structured evidence.
+
+        The result is a one-element list whose ``text`` field contains the
+        JSON-serialised evidence dict, keeping the tool compliant with the
+        MCP narrow-waist contract.
 
         Args:
             arguments: Dict with required ``task_id`` and optional fields.
 
         Returns:
-            Dict with ``evidence`` and ``text`` keys.
+            One-element MCP content list containing JSON-serialised evidence.
         """
         if not isinstance(arguments, dict):
-            return {"evidence": {"error": "arguments must be a dict"}}
+            return _text_content({"evidence": {"error": "arguments must be a dict"}})
         task_id = arguments.get("task_id")
         if task_id is None:
-            return {"evidence": {"error": "missing task_id"}}
+            return _text_content({"evidence": {"error": "missing task_id"}})
         try:
             task_id_int = int(task_id)
         except Exception:  # pylint: disable=broad-exception-caught
-            return {"evidence": {"error": "task_id must be an integer"}}
+            return _text_content({"evidence": {"error": "task_id must be an integer"}})
 
         include_jobs = bool(arguments.get("include_jobs", True))
         timeout = 30
@@ -91,7 +108,7 @@ class FallbackTaskStatusTool:
                 fetch_jsonish, json_url, timeout
             )
         except Exception as e:  # pylint: disable=broad-exception-caught
-            return {
+            return _text_content({
                 "evidence": {
                     "task_id": task_id_int,
                     "monitor_url": monitor_url,
@@ -99,11 +116,15 @@ class FallbackTaskStatusTool:
                     "error": repr(e),
                 },
                 "text": f"Failed to fetch task {task_id_int} metadata (network error).",
-            }
+            })
 
         if payload is None:
-            return self._non_json_response(task_id_int, monitor_url, json_url,
-                                           http_status, content_type, text)
+            return _text_content(
+                self._non_json_response_dict(
+                    task_id_int, monitor_url,
+                    json_url, http_status, content_type, text,
+                )
+            )
 
         task = payload.get("task", {}) if isinstance(payload.get("task"), dict) else {}
         status = (task.get("status") if task else None) or payload.get("status")
@@ -130,10 +151,10 @@ class FallbackTaskStatusTool:
             if status
             else f"Task {task_id_int} metadata fetched."
         )
-        return {"evidence": evidence, "text": summary}
+        return _text_content({"evidence": evidence, "text": summary})
 
     @staticmethod
-    def _non_json_response(
+    def _non_json_response_dict(
         task_id_int: int,
         monitor_url: str,
         json_url: str,

@@ -26,7 +26,7 @@ class HealthTool:
         return {
             "name": "bamboo_health",
             "description": "Return server name/version and enabled integrations.",
-            "inputSchema": {"type": "object", "properties": {}},
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         }
 
     async def call(self, arguments: dict[str, Any]) -> list[dict[str, Any]]:

@@ -49,6 +49,10 @@ class LLMPassthroughTool:
             ),
             "inputSchema": {
                 "type": "object",
+                "anyOf": [
+                    {"required": ["question"]},
+                    {"required": ["messages"]}
+                ],
                 "properties": {
                     "question": {
                         "type": "string",
@@ -79,6 +83,7 @@ class LLMPassthroughTool:
                         "description": "Optional max tokens for the completion.",
                     },
                 },
+                "additionalProperties": False,
             },
         }
 

@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from bamboo.tools._mcp_caller import get_mcp_caller  # type: ignore[import-untyped]
+from bamboo.tools.base import MCPContent, text_content
 
 logger = logging.getLogger(__name__)
 
@@ -152,28 +153,33 @@ class PandaLogAnalysisTool:
         """
         return self._def
 
-    async def call(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:
         """Download logs and return structured failure analysis.
+
+        The result is a one-element ``list[MCPContent]`` whose ``text`` field
+        contains the JSON-serialised evidence dict.  Callers that need the raw
+        evidence should parse ``json.loads(result[0]["text"])``.  This keeps
+        the tool compliant with the MCP narrow-waist contract.
 
         Args:
             arguments: Dict with required ``job_id`` and optional
                 ``query`` and ``context``.
 
         Returns:
-            Dict with ``evidence`` (structured analysis) and ``text``
-            (human-readable summary).
+            One-element MCP content list containing the JSON-serialised
+            evidence and text summary.
         """
         if not isinstance(arguments, dict):
-            return {"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}
+            return text_content(json.dumps({"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}))
 
         job_id = arguments.get("job_id")
         if job_id is None:
-            return {"evidence": {"error": "missing job_id", "provided": arguments}}
+            return text_content(json.dumps({"evidence": {"error": "missing job_id", "provided": str(arguments)}}))
 
         try:
             job_id_int = int(job_id)
         except Exception:  # pylint: disable=broad-exception-caught
-            return {"evidence": {"error": "job_id must be an integer", "provided": arguments}}
+            return text_content(json.dumps({"evidence": {"error": "job_id must be an integer", "provided": str(arguments)}}))
 
         context: str = str(arguments.get("context", "") or "")
         monitor_url = f"https://bigpanda.cern.ch/job?pandaid={job_id_int}"
@@ -192,10 +198,10 @@ class PandaLogAnalysisTool:
 
         if result["error"]:
             base_evidence["error"] = result["error"]
-            return {
+            return text_content(json.dumps({
                 "evidence": base_evidence,
                 "text": f"Failed to analyse job {job_id_int}: {result['error']}",
-            }
+            }))
 
         raw_text: str = result["text"] or ""
         job, pilot_log = _parse_response(raw_text)
@@ -203,13 +209,13 @@ class PandaLogAnalysisTool:
         if job is None:
             base_evidence["not_found"] = True
             base_evidence["raw"] = raw_text[:500]
-            return {
+            return text_content(json.dumps({
                 "evidence": base_evidence,
                 "text": (
                     f"Could not retrieve analysis for job {job_id_int}. "
                     "The job ID may not exist."
                 ),
-            }
+            }))
 
         classification = _classify_failure(job, pilot_log)
         pilot_log_failed = "❌" in pilot_log or "failed" in pilot_log.lower()
@@ -250,7 +256,7 @@ class PandaLogAnalysisTool:
             summary += f" Task buffer: {job['taskbuffererrordiag']}."
         if job.get("piloterrordiag"):
             summary += f" Pilot: {job['piloterrordiag']}."
-        return {"evidence": evidence, "text": summary}
+        return text_content(json.dumps({"evidence": evidence, "text": summary}))
 
 
 panda_log_analysis_tool = PandaLogAnalysisTool()

@@ -1,7 +1,23 @@
 import asyncio
 import json
 
+import json as _json
 from askpanda_atlas import task_status as ts_mod
+
+
+def _unpack(result):
+    """Deserialise the JSON-wrapped MCPContent returned by the tool.
+
+    Tools now return list[MCPContent] with a JSON-encoded evidence dict
+    in the text field.  This helper unwraps that for test assertions.
+
+    Args:
+        result: Return value of tool.call().
+
+    Returns:
+        Deserialised dict with ``evidence`` and ``text`` keys.
+    """
+    return _json.loads(result[0]["text"])
 
 
 class DummyResp:
@@ -37,8 +53,9 @@ def test_task_status_success_json(monkeypatch):
     tool = ts_mod.panda_task_status_tool
     res = asyncio.run(tool.call({"task_id": 1234, "query": "status?"}))
 
-    assert "evidence" in res
-    ev = res["evidence"]
+    unpacked = _unpack(res)
+    assert "evidence" in unpacked
+    ev = unpacked["evidence"]
     assert ev["task_id"] == 1234
     assert ev.get("status") == "finished"
     assert "monitor_url" in ev
@@ -55,7 +72,7 @@ def test_task_status_non_json(monkeypatch):
     tool = ts_mod.panda_task_status_tool
     res = asyncio.run(tool.call({"task_id": 9999, "query": "status?"}))
 
-    ev = res.get("evidence", {})
+    ev = _unpack(res).get("evidence", {})
     assert ev.get("http_status") == 200
     assert ev.get("content_type", "").startswith("text/html")
     assert "response_snippet" in ev
@@ -70,6 +87,6 @@ def test_task_status_404(monkeypatch):
     tool = ts_mod.panda_task_status_tool
     res = asyncio.run(tool.call({"task_id": 1111, "query": "status?"}))
 
-    ev = res.get("evidence", {})
+    ev = _unpack(res).get("evidence", {})
     assert ev.get("http_status") == 404
     assert ev.get("not_found") is True

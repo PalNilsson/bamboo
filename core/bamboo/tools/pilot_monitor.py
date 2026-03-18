@@ -32,6 +32,7 @@ class PandaPilotStatusTool:
                     "window_minutes": {"type": "integer", "description": "Lookback window in minutes", "default": 60},
                 },
                 "required": ["site"],
+                "additionalProperties": False,
             },
         }
 

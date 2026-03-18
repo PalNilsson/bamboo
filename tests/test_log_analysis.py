@@ -6,6 +6,22 @@ from unittest.mock import AsyncMock
 from bamboo.tools.log_analysis import panda_log_analysis_tool, _classify_failure, _parse_response
 
 
+def _unpack(result):
+    """Deserialise the JSON-wrapped MCPContent returned by the tool.
+
+    Tools now return list[MCPContent] with a JSON-encoded evidence dict
+    in the text field.  This helper unwraps that for test assertions.
+
+    Args:
+        result: Return value of tool.call().
+
+    Returns:
+        Deserialised dict with ``evidence`` and ``text`` keys.
+    """
+    import json as _json
+    return _json.loads(result[0]["text"])
+
+
 SAMPLE_JOB = {
     "pandaid": 6837798305,
     "jobstatus": "closed",
@@ -99,12 +115,13 @@ def test_log_analysis_success(monkeypatch):
     """Test successful log analysis with pilot log error (realistic case)."""
     monkeypatch.setattr("bamboo.tools.log_analysis.get_mcp_caller", lambda: _make_caller(text=SAMPLE_RESPONSE))
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6837798305}))
-    ev = result["evidence"]
+    res = _unpack(result)
+    ev = res["evidence"]
     assert ev["job_id"] == 6837798305
     assert ev["failure_classification"] == "reassigned_by_jedi"
     assert ev["taskbuffererrordiag"] == "reassigned by JEDI"
     assert ev["pilot_log_available"] is False
-    assert "reassigned by JEDI" in result["text"]
+    assert "reassigned by JEDI" in res["text"]
 
 
 def test_log_analysis_with_real_log(monkeypatch):
@@ -112,7 +129,8 @@ def test_log_analysis_with_real_log(monkeypatch):
     monkeypatch.setattr("bamboo.tools.log_analysis.get_mcp_caller",
                         lambda: _make_caller(text=SAMPLE_RESPONSE_WITH_LOG))
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1234}))
-    ev = result["evidence"]
+    res = _unpack(result)
+    ev = res["evidence"]
     assert ev["pilot_log_available"] is True
     assert ev["pilot_log_excerpt"] is not None
     assert "Segmentation fault" in ev["pilot_log_excerpt"]
@@ -124,14 +142,15 @@ def test_log_analysis_mcp_error(monkeypatch):
     monkeypatch.setattr("bamboo.tools.log_analysis.get_mcp_caller",
                         lambda: _make_caller(error="bigpanda-downloader not connected"))
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 9999}))
-    assert "error" in result["evidence"]
-    assert "not connected" in result["text"]
+    res = _unpack(result)
+    assert "error" in res["evidence"]
+    assert "not connected" in res["text"]
 
 
 def test_log_analysis_missing_job_id():
     """Test validation when job_id is missing."""
     result = asyncio.run(panda_log_analysis_tool.call({}))
-    assert result["evidence"]["error"] == "missing job_id"
+    assert _unpack(result)["evidence"]["error"] == "missing job_id"
 
 
 def test_get_definition():

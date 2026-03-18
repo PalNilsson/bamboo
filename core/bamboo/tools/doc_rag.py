@@ -88,6 +88,7 @@ class PandaDocSearchTool:
                     },
                 },
                 "required": ["query"],
+                "additionalProperties": False,
             },
         }
 
