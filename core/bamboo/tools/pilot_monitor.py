@@ -24,7 +24,12 @@ class PandaPilotStatusTool:
         """
         return {
             "name": "panda_pilot_status",
-            "description": "Return pilot counts/failures for a site (dummy implementation).",
+            "description": (
+                "Get pilot job counts and recent failure rates for a named "
+                "ATLAS computing site. Use when the question asks about pilot "
+                "health, submission failures, or whether a site is currently "
+                "experiencing problems."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {

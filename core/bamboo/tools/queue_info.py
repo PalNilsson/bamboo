@@ -29,7 +29,12 @@ class PandaQueueInfoTool:
         """
         return {
             "name": "panda_queue_info",
-            "description": "Return site/queue information from queuedata.json (dummy local file).",
+            "description": (
+                "Look up queue and site configuration for a named ATLAS "
+                "computing site (e.g. BNL-ATLAS, CERN-PROD). Returns resource "
+                "limits, queue names, and site parameters. Use when a question "
+                "asks about a specific site's capabilities or configuration."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {

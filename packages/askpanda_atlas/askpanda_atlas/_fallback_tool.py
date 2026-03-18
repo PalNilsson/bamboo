@@ -33,8 +33,10 @@ def get_definition() -> dict[str, Any]:
     return {
         "name": "panda_task_status",
         "description": (
-            "Fetch PanDA task metadata from BigPanDA and return "
-            "structured evidence for LLM summarisation."
+            "Get the current status, progress, and metadata of a PanDA task by its "
+            "task ID (jeditaskid). Use when the question is about a specific task: "
+            "its status, completion rate, dataset info, error counts, or list of jobs. "
+            "For questions about an individual job, use panda_job_status instead."
         ),
         "inputSchema": {
             "type": "object",

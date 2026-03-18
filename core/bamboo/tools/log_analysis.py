@@ -49,9 +49,11 @@ def get_definition() -> dict[str, Any]:
     return {
         "name": "panda_log_analysis",
         "description": (
-            "Download and analyse a PanDA job failure from BigPanDA. "
-            "Returns structured evidence including job metadata, error codes, "
-            "pilot log excerpt, and failure classification."
+            "Diagnose why a specific PanDA job failed. Downloads the job's "
+            "pilot log and error metadata from BigPanDA and classifies the "
+            "failure (e.g. timeout, segfault, memory error, network issue, "
+            "reassignment). Use when the question asks why a job failed, what "
+            "the error was, or what action to take."
         ),
         "inputSchema": {
             "type": "object",

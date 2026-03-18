@@ -44,8 +44,10 @@ class LLMPassthroughTool:
         return {
             "name": "bamboo_llm_answer",
             "description": (
-                "Send the full prompt (optionally including chat history) to the "
-                "default LLM profile and return the raw response text."
+                "Send a question or conversation directly to the default LLM and "
+                "return its response. Use for open-ended questions, follow-ups, or "
+                "tasks that do not require live PanDA data. "
+                "Does not call any other tools."
             ),
             "inputSchema": {
                 "type": "object",

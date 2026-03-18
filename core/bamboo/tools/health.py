@@ -25,7 +25,12 @@ class HealthTool:
         """
         return {
             "name": "bamboo_health",
-            "description": "Return server name/version and enabled integrations.",
+            "description": (
+                "Check that the Bamboo MCP server is running and return its "
+                "version, configured LLM provider, and which optional "
+                "integrations (RAG, tracing) are enabled. Use for diagnostics "
+                "or to confirm the server is reachable."
+            ),
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         }
 

@@ -14,7 +14,7 @@ package-dir = {"" = "."}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["bamboo*"]
+include = ["bamboo*", "interfaces*"]
 
 [tool.askpanda]
 default_namespace = "atlas"

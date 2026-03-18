@@ -82,10 +82,11 @@ class PandaDocBM25Tool:
         return {
             "name": "panda_doc_bm25",
             "description": (
-                "Keyword (BM25) search over the Bamboo/PanDA documentation. "
-                "Complements semantic search — use for exact-match queries such "
-                "as listing error codes, finding specific class or function names, "
-                "or looking up configuration parameters by name."
+                "Search the PanDA and Bamboo documentation by exact keyword match. "
+                "Prefer over panda_doc_search when the question contains specific "
+                "terms such as error codes, parameter names, class names, or "
+                "command names where an exact match matters more than semantic "
+                "similarity."
             ),
             "inputSchema": {
                 "type": "object",

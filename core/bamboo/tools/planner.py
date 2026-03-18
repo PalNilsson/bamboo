@@ -316,8 +316,11 @@ class BambooPlannerTool:
         return {
             "name": "bamboo_plan",
             "description": (
-                "LLM-backed planner that returns a JSON execution plan (route + tool_calls). "
-                "Use it when deterministic routing is uncertain or when a multi-step plan is required."
+                "Decompose a complex question into a structured plan of tool calls. "
+                "Use when a question requires multiple steps, combines task and "
+                "job lookups, or when intent is ambiguous and deterministic routing "
+                "is insufficient. Returns a validated JSON plan — not a final answer. "
+                "The caller is responsible for executing the plan's tool_calls."
             ),
             "inputSchema": {
                 "type": "object",

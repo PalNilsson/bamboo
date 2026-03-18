@@ -509,8 +509,11 @@ class BambooAnswerTool:
         return {
             "name": "bamboo_answer",
             "description": (
-                "ATLAS Bamboo entrypoint. Uses tools + LLM to answer, "
-                "summarising task metadata when applicable."
+                "Answer questions about PanDA tasks, jobs, and ATLAS workflows. "
+                "Automatically identifies whether the question concerns a specific "
+                "task ID, job ID, log failure, or general documentation, calls the "
+                "appropriate tool, and returns a synthesised natural-language answer. "
+                "Use this as the single entry point for all PanDA/ATLAS questions."
             ),
             "inputSchema": {
                 "type": "object",

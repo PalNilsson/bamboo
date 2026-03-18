@@ -12,15 +12,36 @@ calls over JSON-RPC 2.0.  Two transports are supported:
 
 ## How LLMs are used
 
-LLMs play three distinct roles in Bamboo, each with a different purpose and
-trigger condition.  Critically, **LLMs do not select tools** — tool selection
-is deterministic.
+Bamboo uses LLMs for three distinct purposes.  Understanding which role each
+LLM plays — and which role it deliberately does *not* play — is key to
+understanding the architecture.
+
+### The standard MCP loop (not how Bamboo's own UIs work)
+
+In standard MCP usage a *host LLM* (e.g. Claude Desktop, Cursor) calls
+`tools/list`, receives the tool catalog (`name`, `description`,
+`inputSchema`), and uses that information to decide which tool to call and
+with what arguments.  **Bamboo's server fully supports this pattern** — the
+catalog is published, schemas are strict, and an external MCP host can drive
+tool selection entirely.
+
+However, **Bamboo's own UIs (TUI and Streamlit) do not use this pattern.**
+They call `bamboo_answer` directly by name, bypassing external LLM-based tool
+selection.  `bamboo_answer` is a server-side orchestrator that selects and
+calls the individual tools internally using deterministic routing.
+
+### The three LLM roles inside bamboo_answer
+
+When `bamboo_answer` handles a request, LLMs are used for:
 
 | Role | When | LLM profile | Source |
 |---|---|---|---|
 | **Topic classification** | Only when keyword matching is ambiguous | fast | `bamboo.tools.topic_guard` |
 | **Answer synthesis** | Always, after every tool call | default | `bamboo_answer._call_llm()` |
 | **Plan generation** | Only when `bamboo_plan` is called explicitly | default | `bamboo.tools.planner` |
+
+In none of these roles does the LLM *select tools* — that decision is made
+deterministically by `_route()` from the question text.
 
 ### Topic classification
 
@@ -107,14 +128,33 @@ raising, so clients always receive a response.
 
 ## Orchestration model
 
-Bamboo supports two complementary orchestration styles:
+Bamboo supports two complementary orchestration styles, and the tool catalog
+serves both:
 
-1. **Client-driven**: an MCP client reads `/tools/list` and lets a host LLM
-   choose tools (standard MCP pattern).
-2. **Server-driven (`bamboo_answer`)**: the `bamboo_answer` tool routes
-   requests itself using deterministic rules, a two-stage topic guard, and
-   LLM synthesis.  The `bamboo_plan` tool is available as a separate
-   entry point for clients that want LLM-backed planning.
+1. **External-LLM-driven (standard MCP)**: a host LLM (Claude Desktop,
+   Cursor, or any MCP client) reads `tools/list`, uses the tool `name`,
+   `description`, and `inputSchema` to decide which tool to call, and sends
+   a `tools/call` request directly.  The individual tools (`panda_task_status`,
+   `panda_job_status`, `panda_log_analysis`, etc.) are designed to be called
+   this way.  Their schemas are strict (`additionalProperties: false`,
+   `required` fields declared) precisely so an external LLM can reason about
+   them reliably.
+
+2. **Server-driven (`bamboo_answer`)**: Bamboo's own UIs call `bamboo_answer`
+   directly.  `bamboo_answer` selects and calls the individual tools itself
+   using deterministic regex routing — no external LLM is involved in tool
+   selection.  The `bamboo_plan` tool is available as a separate entry point
+   for clients that want LLM-backed planning when deterministic routing is
+   insufficient.
+
+> **Note on tool descriptions**: because the tool catalog is exposed to
+> external LLM clients, the `description` field of each tool definition is
+> part of the public contract.  Descriptions should be written from the
+> perspective of an LLM deciding whether to call a tool, not from an
+> implementer's perspective.  For example, `panda_task_status` says "return
+> structured evidence for LLM summarisation" — useful to a developer, but
+> not helpful to an LLM choosing between `panda_task_status` and
+> `panda_job_status`.  Improving description quality is an open task.
 
 ### bamboo_answer routing (server-driven)
 

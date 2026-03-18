@@ -265,7 +265,7 @@ class BambooTui(App):
 
     #thinking {
         height: auto;
-        padding: 0 2;
+        padding: 0 2 0 3;
         display: none;
     }
 
@@ -643,15 +643,6 @@ class BambooTui(App):
             "messages": list(self._history),
             "include_raw": self.debug_mode,
         }
-
-        provider = args.get("provider") or os.getenv("LLM_DEFAULT_PROVIDER") or "mistral"
-        model = args.get("model") or os.getenv("LLM_DEFAULT_MODEL") or "..."
-        if provider:
-            args["provider"] = provider
-            args["llm_provider"] = provider
-        if model:
-            args["model"] = model
-            args["llm_model"] = model
 
         # Store task ID if present so /json can fetch the raw payload directly.
         try:
@@ -1043,12 +1034,7 @@ class BambooTui(App):
         if not self.thinking_widget:
             return False
         self.thinking_widget.update(
-            Panel(
-                Text("Thinking…", style="dim italic"),
-                title=f"{_now()}  AskPanDA",
-                border_style="dim",
-                padding=(0, 1),
-            )
+            Text(f"{_now()}  Thinking…", style="dim italic")
         )
         self.thinking_widget.add_class("active")
         return True

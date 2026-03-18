@@ -70,9 +70,11 @@ class PandaDocSearchTool:
         return {
             "name": "panda_doc_search",
             "description": (
-                "Search the Bamboo/PanDA documentation knowledge base using "
-                "semantic similarity.  Returns the most relevant document "
-                "chunks from a pre-built ChromaDB vector store."
+                "Search the PanDA and Bamboo documentation for conceptual "
+                "questions, how-to guidance, configuration options, or "
+                "explanations of system behaviour. Use when the question is about "
+                "how something works rather than the live status of a specific "
+                "task or job. Complements panda_doc_bm25 for exact-match lookups."
             ),
             "inputSchema": {
                 "type": "object",
