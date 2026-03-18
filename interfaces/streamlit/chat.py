@@ -41,6 +41,7 @@ Run:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
 from dataclasses import dataclass
@@ -51,6 +52,16 @@ import textwrap
 import streamlit as st
 
 from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig
+
+# Maximum user+assistant turn *pairs* kept in context.  Matches the TUI default.
+_DEFAULT_HISTORY_TURNS = 10
+try:
+    _MAX_HISTORY_TURNS: int = int(os.getenv("BAMBOO_HISTORY_TURNS", str(_DEFAULT_HISTORY_TURNS)))
+except ValueError:
+    _MAX_HISTORY_TURNS = _DEFAULT_HISTORY_TURNS
+
+# Preferred answer tool candidates, in priority order.
+_ANSWER_TOOL_CANDIDATES = ["bamboo_answer", "askpanda_answer", "bamboo_plan"]
 
 # --- UI tweaks: pin chat input to bottom and neutralize focus styling ---
 _CHAT_CSS = textwrap.dedent(
@@ -314,6 +325,46 @@ def _prompt_names(prompts_result: Any) -> list[str]:
     return sorted(set(names))
 
 
+def _cap_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Trim a messages list to at most ``_MAX_HISTORY_TURNS`` user+assistant pairs.
+
+    Each pair consists of one user message and one assistant reply (2 entries).
+    The most recent turns are kept; older turns are discarded from the front.
+
+    Args:
+        messages: Current full message list.
+
+    Returns:
+        Trimmed message list, at most ``_MAX_HISTORY_TURNS * 2`` entries long.
+    """
+    max_messages = _MAX_HISTORY_TURNS * 2
+    if len(messages) > max_messages:
+        return messages[-max_messages:]
+    return messages
+
+
+def _detect_answer_tool(tool_names: Sequence[str]) -> str:
+    """Select the preferred answer tool from available tools.
+
+    Checks ``_ANSWER_TOOL_CANDIDATES`` in priority order, then falls back to
+    any tool containing ``"answer"`` in its name.
+
+    Args:
+        tool_names: Tool names returned by the MCP server.
+
+    Returns:
+        Name of the best available answer tool, or ``"bamboo_answer"`` as a
+        hard fallback if nothing matches.
+    """
+    for candidate in _ANSWER_TOOL_CANDIDATES:
+        if candidate in tool_names:
+            return candidate
+    for name in tool_names:
+        if "answer" in name:
+            return name
+    return "bamboo_answer"
+
+
 def _guess_auto_tool(question: str, available_tools: Sequence[str]) -> tuple[str, JSONDict]:
     """Pick a reasonable tool + arguments based on a question (light heuristic).
 
@@ -431,6 +482,11 @@ def _sidebar_config() -> UIConfig:
         st.cache_resource.clear()
         st.rerun()
 
+    if st.sidebar.button("Clear chat history"):
+        st.session_state["messages"] = []
+        st.session_state.pop("_pending_assistant", None)
+        st.rerun()
+
     # End-to-end test / escape hatch: bypass tool routing and send the full chat
     # (including history) directly to the default LLM profile.
     if "bypass_routing" not in st.session_state:
@@ -516,6 +572,9 @@ def _chat_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
     - recording the submitted user message and triggering a rerun
     - generating the assistant response on the *next* run before rendering history
 
+    Conversation history is capped at ``_MAX_HISTORY_TURNS`` user+assistant
+    pairs so the LLM context window stays manageable.
+
     Args:
         mcp: Connected MCP client (sync wrapper).
         tool_names: List of available tool names.
@@ -525,6 +584,8 @@ def _chat_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
     if "messages" not in st.session_state:
         st.session_state["messages"] = []  # type: ignore[assignment]
 
+    answer_tool = _detect_answer_tool(tool_names)
+
     # If we have a pending assistant response, generate it first so it appears
     # in the history above the input box (ChatGPT-style).
     if st.session_state.get("_pending_assistant", False):
@@ -532,17 +593,15 @@ def _chat_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
 
         with st.spinner("Thinking…"):
             try:
-                # Always route via the server-side orchestration tool.
-                tool = "askpanda_answer"
                 last_user = next(
                     (m["content"] for m in reversed(st.session_state["messages"]) if m.get("role") == "user"),
                     "",
                 )
                 result = mcp.call_tool(
-                    tool,
+                    answer_tool,
                     {
                         "question": last_user,
-                        "messages": st.session_state["messages"],
+                        "messages": list(st.session_state["messages"]),
                         "bypass_routing": st.session_state.get("bypass_routing", False),
                     },
                 )
@@ -554,9 +613,16 @@ def _chat_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
                 answer = f"Tool call failed: {e}"
 
         st.session_state["messages"].append({"role": "assistant", "content": answer})  # type: ignore[index]
+        # Cap history after recording the assistant reply.
+        st.session_state["messages"] = _cap_messages(st.session_state["messages"])
         # Rerun once more so the assistant message is rendered as part of history
         # and the input stays at the bottom.
         st.rerun()
+
+    # Show turn count indicator.
+    n_pairs = len(st.session_state["messages"]) // 2
+    if n_pairs > 0:
+        st.caption(f"Context: {n_pairs}/{_MAX_HISTORY_TURNS} turn{'s' if n_pairs != 1 else ''} in memory")
 
     # Show chat history
     for msg in st.session_state["messages"]:

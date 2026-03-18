@@ -65,9 +65,10 @@ Type any question and press Enter. Slash commands:
 | `/task <id>` | Shorthand for "summarise task \<id\>" |
 | `/tracing` | Show timing and trace spans for the last request |
 | `/json` | Show raw BigPanDA JSON for the last task query |
+| `/history` | Show turns currently held in context memory |
 | `/debug on\|off` | Toggle verbose tool call output |
 | `/tools` | List tools registered on the server |
-| `/clear` | Clear the transcript |
+| `/clear` | Clear transcript and reset context memory |
 | `/exit` | Quit |
 
 Keyboard: `PageUp`/`PageDown` to scroll, `Ctrl+Q` to quit.

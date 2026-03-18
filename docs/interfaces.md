@@ -103,7 +103,64 @@ export BAMBOO_TUI_INLINE_HEIGHT=60
 
 ---
 
-# 3. Shared MCP Client
+## Slash Commands (Textual TUI)
+
+| Command | Description |
+|---|---|
+| `/help` | Show all commands |
+| `/tools` | List tools registered on the server |
+| `/task <id>` | Shorthand for "summarise task \<id\>" |
+| `/json` | Show raw BigPanDA JSON for the last task query |
+| `/tracing` | Show timing and trace spans for the last request |
+| `/history` | Show turns currently held in context memory |
+| `/debug on\|off` | Toggle verbose tool call output |
+| `/clear` | Clear transcript **and reset context memory** |
+| `/exit` | Quit |
+
+---
+
+## Context Memory (Multi-Turn Chat)
+
+The Textual TUI maintains an in-memory conversation history that is sent
+to the server on every question.  This enables follow-up questions such as:
+
+- *"Tell me more about the brokerage part."* (after a RAG answer)
+- *"What about the failed jobs?"* (after a task query)
+- *"Is that the same error as last time?"* (after a log analysis)
+
+### How it works
+
+- Each user question and its assistant reply are appended to `_history`.
+- The full history is included as `messages` in every `bamboo_answer` call.
+- The server extracts prior turns and injects them between the system prompt
+  and the synthesised user message, so the LLM sees the conversation context.
+- History uses **raw question/answer text**, not the synthesised prompts that
+  embed task JSON or RAG excerpts — keeping token counts low.
+
+### History cap
+
+History is capped at `BAMBOO_HISTORY_TURNS` user+assistant pairs (default 10).
+Older turns are discarded from the front of the list when the cap is reached.
+
+```bash
+export BAMBOO_HISTORY_TURNS=5   # keep only the last 5 question+answer pairs
+```
+
+### Resetting history
+
+- `/clear` clears the transcript **and** resets the history.
+- Restarting the TUI always starts with empty history (no persistence).
+
+### Inspecting history
+
+```
+/history
+```
+
+Displays a table of the turns currently in context — role, character count,
+and a truncated preview.  Useful for debugging follow-up resolution.
+
+---
 
 Both Streamlit and Textual interfaces use:
 

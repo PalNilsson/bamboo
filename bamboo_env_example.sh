@@ -149,4 +149,13 @@ export BAMBOO_CHROMA_COLLECTION="document_monitor_agent"
 # Useful if running the server as a background subprocess in other contexts.
 # export BAMBOO_QUIET="1"
 
+# ---------------------------------------------------------------------------
+# Context memory (multi-turn chat history)
+# ---------------------------------------------------------------------------
+# Maximum number of user+assistant turn *pairs* to keep in context per session.
+# Each pair = 1 user message + 1 assistant reply (2 messages total).
+# Default: 10 pairs (20 messages).  Set lower to reduce LLM token usage.
+# History is held in-memory in the TUI only; the server is always stateless.
+# export BAMBOO_HISTORY_TURNS="10"
+
 echo "AskPanDA LLM environment variables loaded (example configuration)."

@@ -192,21 +192,35 @@ def _extract_delegated_text(delegated: Any) -> str:
     return str(delegated)
 
 
-async def _call_llm(system: str, user: str) -> str:
+async def _call_llm(
+    system: str,
+    user: str,
+    history: list[Message] | None = None,
+) -> str:
     """Call the default LLM with a system + user prompt and return the text.
+
+    Prior conversation turns (``history``) are inserted between the system
+    prompt and the synthesised user message so the model can resolve follow-up
+    questions.  History should contain **raw** question/answer pairs, not the
+    synthesised prompts that embed retrieved context or task JSON.
 
     Args:
         system: System prompt string.
-        user: User prompt string.
+        user: Synthesised user prompt for the current turn.
+        history: Optional list of prior ``{role, content}`` turns to inject
+            between the system prompt and the current user message.  Must
+            contain only ``"user"`` and ``"assistant"`` roles.
 
     Returns:
         LLM response text.
     """
+    messages: list[Message] = [{"role": "system", "content": system}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user})
+
     delegated = await bamboo_llm_answer_tool.call({
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        "messages": messages,
         "max_tokens": 2048,
     })
     return _extract_delegated_text(delegated)
@@ -321,6 +335,53 @@ async def _retrieve_rag_context(question: str) -> str:
         return vec_ctx or bm25_ctx
     except Exception:  # pylint: disable=broad-exception-caught
         return ""  # retrieval failure is non-fatal
+
+
+def _extract_history(messages: list[Message], current_question: str) -> list[Message]:
+    """Extract prior conversation turns from a full messages list.
+
+    The current question (last user message) is excluded so it is not
+    duplicated when the synthesised user prompt is appended by ``_call_llm``.
+    Only ``"user"`` and ``"assistant"`` role messages are kept; ``"system"``
+    messages from the client are dropped because ``_call_llm`` builds its own
+    system prompt.
+
+    Only the **last** user turn whose content matches ``current_question`` is
+    stripped — earlier turns with the same text (repeated questions) are
+    preserved.
+
+    Args:
+        messages: Full coerced chat history including the current turn.
+        current_question: The question that was derived from the last user
+            message, used to identify and strip the final user turn.
+
+    Returns:
+        List of prior ``{role, content}`` Message dicts in chronological
+        order, suitable for passing as the ``history`` argument to
+        ``_call_llm``.
+    """
+    allowed_roles = {"user", "assistant"}
+    # Find the index of the *last* user turn that matches current_question.
+    tail_idx: int | None = None
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if (
+            msg.get("role") == "user" and
+            str(msg.get("content", "")).strip() == current_question.strip()
+        ):
+            tail_idx = i
+            break
+
+    prior: list[Message] = []
+    for i, msg in enumerate(messages):
+        role = msg.get("role", "")
+        content = str(msg.get("content", "")).strip()
+        if role not in allowed_roles or not content:
+            continue
+        if i == tail_idx:
+            continue  # skip only the one identified current-question turn
+        prior.append({"role": role, "content": content})  # type: ignore[typeddict-item]
+    return prior
 
 
 def _friendly_llm_error(exc: LLMError) -> str:
@@ -497,9 +558,10 @@ class BambooAnswerTool:
             raise ValueError("Either 'question' or non-empty 'messages' must be provided.")
 
         try:
+            history = _extract_history(messages, question) if messages else []
             return await self._route(
                 question=question,
-                messages=messages,
+                history=history,
                 bypass_routing=bypass_routing,
                 include_jobs=include_jobs,
                 include_raw=include_raw,
@@ -510,7 +572,7 @@ class BambooAnswerTool:
     async def _route(
         self,
         question: str,
-        messages: list[Message],
+        history: list[Message],
         bypass_routing: bool,
         include_jobs: bool,
         include_raw: bool,
@@ -519,7 +581,8 @@ class BambooAnswerTool:
 
         Args:
             question: Extracted or derived user question string.
-            messages: Coerced chat history.
+            history: Prior conversation turns (user/assistant pairs) excluding
+                the current question, ready to be threaded into ``_call_llm``.
             bypass_routing: Skip ID extraction and go directly to the LLM.
             include_jobs: Pass ``?jobs=1`` when fetching task metadata.
             include_raw: Append raw BigPanDA response snippet on errors.
@@ -528,8 +591,13 @@ class BambooAnswerTool:
             List[MCPContent]: One-element MCP text content list.
         """
         if bypass_routing:
+            # Bypass path already uses the full messages list directly.
+            msgs: list[Message] = []
+            if history:
+                msgs.extend(history)
+            msgs.append({"role": "user", "content": question})
             delegated = await bamboo_llm_answer_tool.call(
-                {"messages": messages} if messages else {"question": question}
+                {"messages": msgs} if msgs else {"question": question}
             )
             return text_content(_extract_delegated_text(delegated))
 
@@ -548,21 +616,22 @@ class BambooAnswerTool:
         job_id = _extract_job_id(question)
 
         if job_id and _is_log_analysis_request(question):
-            return await self._synthesise_log_analysis(question, job_id)
+            return await self._synthesise_log_analysis(question, job_id, history)
         if job_id and not task_id:
-            return await self._synthesise_job(question, job_id, include_raw)
+            return await self._synthesise_job(question, job_id, include_raw, history)
         if not task_id:
-            return await self._synthesise_rag(question)
-        return await self._synthesise_task(question, task_id, include_jobs, include_raw)
+            return await self._synthesise_rag(question, history)
+        return await self._synthesise_task(question, task_id, include_jobs, include_raw, history)
 
     async def _synthesise_log_analysis(
-        self, question: str, job_id: int
+        self, question: str, job_id: int, history: list[Message]
     ) -> list[MCPContent]:
         """Fetch job log analysis and synthesise a diagnostic answer.
 
         Args:
             question: Original user question.
             job_id: Extracted PanDA job ID.
+            history: Prior conversation turns to inject into the LLM prompt.
 
         Returns:
             List[MCPContent]: One-element MCP text content list.
@@ -586,11 +655,11 @@ class BambooAnswerTool:
         )
         user = f"User question:\n{question}\n\nEvidence JSON:\n{_compact(evidence)}\n"
         async with span(EVENT_SYNTHESIS, tool="bamboo_answer", route="log_analysis"):
-            body = await _call_llm(system, user)
+            body = await _call_llm(system, user, history)
         return text_content(body)
 
     async def _synthesise_job(
-        self, question: str, job_id: int, include_raw: bool
+        self, question: str, job_id: int, include_raw: bool, history: list[Message]
     ) -> list[MCPContent]:
         """Fetch job status and synthesise a concise status answer.
 
@@ -598,6 +667,7 @@ class BambooAnswerTool:
             question: Original user question.
             job_id: Extracted PanDA job ID.
             include_raw: Append raw BigPanDA response preview on errors.
+            history: Prior conversation turns to inject into the LLM prompt.
 
         Returns:
             List[MCPContent]: One-element MCP text content list.
@@ -626,12 +696,12 @@ class BambooAnswerTool:
             system += "\nOn error, include the Raw response preview verbatim at the end inside a fenced code block.\n"
             user += f"\nRaw response preview:\n{raw_preview}\n"
         async with span(EVENT_SYNTHESIS, tool="bamboo_answer", route="job"):
-            body = await _call_llm(system, user)
+            body = await _call_llm(system, user, history)
         if raw_preview and "Raw response preview" not in body:
             body = f"{body.rstrip()}\n\nRaw response preview:\n```text\n{raw_preview}\n```\n"
         return text_content(body)
 
-    async def _synthesise_rag(self, question: str) -> list[MCPContent]:
+    async def _synthesise_rag(self, question: str, history: list[Message]) -> list[MCPContent]:
         """Retrieve documentation context and synthesise a grounded answer.
 
         Runs vector and BM25 retrieval concurrently, then calls the LLM with
@@ -640,6 +710,7 @@ class BambooAnswerTool:
 
         Args:
             question: Original user question.
+            history: Prior conversation turns to inject into the LLM prompt.
 
         Returns:
             List[MCPContent]: One-element MCP text content list.
@@ -684,11 +755,12 @@ class BambooAnswerTool:
             user = f"User question:\n{question}\n"
 
         async with span(EVENT_SYNTHESIS, tool="bamboo_answer", route="rag"):
-            body = await _call_llm(system, user)
+            body = await _call_llm(system, user, history)
         return text_content(body)
 
     async def _synthesise_task(
-        self, question: str, task_id: int, include_jobs: bool, include_raw: bool
+        self, question: str, task_id: int, include_jobs: bool, include_raw: bool,
+        history: list[Message]
     ) -> list[MCPContent]:
         """Fetch task metadata and synthesise an answer grounded in it.
 
@@ -697,6 +769,7 @@ class BambooAnswerTool:
             task_id: Extracted PanDA task ID.
             include_jobs: Pass ``?jobs=1`` to the task status tool.
             include_raw: Append raw BigPanDA response preview on errors.
+            history: Prior conversation turns to inject into the LLM prompt.
 
         Returns:
             List[MCPContent]: One-element MCP text content list.
@@ -735,7 +808,7 @@ class BambooAnswerTool:
         user = self._build_task_prompt(question, evidence, raw_preview)
 
         async with span(EVENT_SYNTHESIS, tool="bamboo_answer", route="task"):
-            body = await _call_llm(system, user)
+            body = await _call_llm(system, user, history)
 
         if raw_preview and include_raw:
             body = (
@@ -815,4 +888,4 @@ class BambooAnswerTool:
 
 bamboo_answer_tool = BambooAnswerTool()
 
-__all__ = ["BambooAnswerTool", "bamboo_answer_tool"]
+__all__ = ["BambooAnswerTool", "bamboo_answer_tool", "_extract_history"]

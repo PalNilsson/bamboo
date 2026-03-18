@@ -47,6 +47,14 @@ from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig
 
 DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
 
+# Maximum number of user+assistant turn *pairs* to keep in context.
+# Each pair = 2 messages (1 user + 1 assistant), so 10 pairs = 20 messages.
+_DEFAULT_HISTORY_TURNS = 10
+try:
+    _MAX_HISTORY_TURNS: int = int(os.getenv("BAMBOO_HISTORY_TURNS", str(_DEFAULT_HISTORY_TURNS)))
+except ValueError:
+    _MAX_HISTORY_TURNS = _DEFAULT_HISTORY_TURNS
+
 ENV_LLM_DEFAULT_PROVIDER = "LLM_DEFAULT_PROVIDER"
 ENV_LLM_DEFAULT_MODEL = "LLM_DEFAULT_MODEL"
 ENV_LLM_DEFAULT_PROVIDER_ALT = "ASKPANDA_LLM_DEFAULT_PROVIDER"
@@ -306,6 +314,7 @@ class BambooTui(App):
         self.help_text: str = "Enter to send • /help"
 
         self.debug_mode: bool = False
+        self._history: List[Dict[str, str]] = []  # In-memory chat history for multi-turn context
         self._mcp_ready: bool = False
         self._last_raw_result: Any = None  # Most recent raw MCP tool result for /json
         self._last_task_id: Optional[int] = None  # Most recent task ID queried
@@ -510,10 +519,11 @@ class BambooTui(App):
             self.input_widget.focus()
 
     async def action_clear(self) -> None:
-        """Clear the transcript."""
+        """Clear the transcript and reset conversation history."""
         if self.transcript:
             self.transcript.clear()
-        self._write_system("Transcript cleared.")
+        self._history = []
+        self._write_system("Transcript cleared and context memory reset.")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle Enter on the input field.
@@ -604,6 +614,11 @@ class BambooTui(App):
     async def _handle_question(self, question: str) -> None:
         """Send a question to the answer tool and render the response.
 
+        Appends the user turn to the in-memory history, sends the full history
+        to the server on each call, then records the assistant reply.  History
+        is capped at ``_MAX_HISTORY_TURNS`` user+assistant pairs so the context
+        window stays manageable.
+
         Displays a "thinking" indicator while the server processes the request,
         then replaces it with the assistant response on completion.
 
@@ -620,8 +635,12 @@ class BambooTui(App):
             self._write_error("No answer tool found. Try /tools to inspect server tools.")
             return
 
+        # Append the current user turn to history before sending.
+        self._history.append({"role": "user", "content": question})
+
         args: Dict[str, Any] = {
             "question": question,
+            "messages": list(self._history),
             "include_raw": self.debug_mode,
         }
 
@@ -654,12 +673,52 @@ class BambooTui(App):
 
             out = _extract_text(res) or "*(No text output; enable /debug on to see raw result.)*"
             self._replace_thinking(thinking, out)
+
+            # Record the assistant reply and enforce the history cap.
+            self._history.append({"role": "assistant", "content": out})
+            self._cap_history()
+
         except Exception as exc:
             self._replace_thinking(thinking, None)
             self._write_error(str(exc))
+            # Remove the user turn we optimistically appended on failure.
+            if self._history and self._history[-1] == {"role": "user", "content": question}:
+                self._history.pop()
+
+    def _cap_history(self) -> None:
+        """Trim ``_history`` to at most ``_MAX_HISTORY_TURNS`` user+assistant pairs.
+
+        Each pair consists of one user message followed by one assistant
+        message (2 entries).  The most recent turns are kept; older turns
+        are discarded from the front of the list.
+        """
+        max_messages = _MAX_HISTORY_TURNS * 2
+        if len(self._history) > max_messages:
+            self._history = self._history[-max_messages:]
 
     async def _handle_command(self, cmdline: str) -> None:
         """Handle slash commands.
+
+        Dispatches the ``/task <id>`` shorthand directly, then delegates all
+        other commands to :meth:`_dispatch_slash_command`.
+
+        Args:
+            cmdline (str): Raw command line beginning with ``/``.
+        """
+        m_task = _TASK_CMD_RE.match(cmdline.strip())
+        if m_task:
+            task_id = m_task.group(1)
+            await self._handle_question(
+                f"Summarize the status of task {task_id} including dataset info."
+            )
+            return
+        await self._dispatch_slash_command(cmdline)
+
+    async def _dispatch_slash_command(self, cmdline: str) -> None:
+        """Dispatch a slash command to the appropriate handler.
+
+        Split out from :meth:`_handle_command` to keep cyclomatic complexity
+        under the project limit (max-complexity = 15).
 
         Args:
             cmdline (str): Raw command line beginning with ``/``.
@@ -668,83 +727,145 @@ class BambooTui(App):
         cmd = parts[0].lower()
         args = parts[1:]
 
-        m_task = _TASK_CMD_RE.match(cmdline.strip())
-        if m_task:
-            task_id = m_task.group(1)
-            await self._handle_question(
-                f"Summarize the status of task {task_id} including dataset info."
-            )
-            return
-
         if cmd in ("/help", "/?"):
-            self._write_system(
-                "Commands:\n"
-                "  /help                 Show this help\n"
-                "  /tools                List tools exposed by the MCP server\n"
-                "  /task <id>             Shorthand for: status of task <id>\n"
-                "  /json                 Show full raw server JSON for last response\n"
-                "  /tracing              Show timing + trace spans for last request\n"
-                "  /plugin <id>          Switch plugin (affects banner tool name)\n"
-                "  /debug on|off         Toggle debug (shows tool calls + raw results)\n"
-                "  /clear                Clear transcript\n"
-                "  /exit, /quit          Exit the app\n"
-                "\n"
-                "Tip: Use PageUp/PageDown to scroll. To copy text, hold Option (macOS) or\n"
-                "     Shift (Linux/Windows) while selecting with the mouse.\n"
-                "Use --no-inline to use the alternate screen."
-            )
+            self._cmd_help()
             return
-
         if cmd in ("/exit", "/quit"):
             self.exit()
             return
-
         if cmd == "/tools":
-            if self._mcp_ready:
-                await self._refresh_tools()
-            if not self.tool_names:
-                self._write_system("No tools returned by server.")
-                return
-            body = "\n".join(f"- `{n}`" for n in self.tool_names)
-            self._write_panel(Markdown(body), title=f"{_now()}  tools")
+            await self._cmd_tools()
             return
-
         if cmd == "/tracing":
             self._handle_tracing_command()
             return
-
         if cmd == "/json":
             await self._handle_json_command()
             return
-
+        if cmd == "/history":
+            self._handle_history_command()
+            return
         if cmd == "/plugin":
-            if not args:
-                self._write_system(f"Current plugin: {self.plugin_id}")
-                return
-            self.plugin_id = args[0]
-            if self._mcp_ready:
-                await self._refresh_tools()
-                self._detect_answer_tool()
-                await self._load_banner()
-                self._render_banner()
-            else:
-                self._render_banner_placeholder()
-            self._write_system(f"Switched plugin to: {self.plugin_id}")
+            await self._cmd_plugin(args)
             return
-
         if cmd == "/debug":
-            if args and args[0].lower() in ("on", "off"):
-                self.debug_mode = args[0].lower() == "on"
-            else:
-                self.debug_mode = not self.debug_mode
-            self._write_system(f"Debug {'ON' if self.debug_mode else 'OFF'}.")
+            self._cmd_debug(args)
             return
-
         if cmd == "/clear":
             await self.action_clear()
             return
-
         self._write_system(f"Unknown command: {cmdline} (try /help)")
+
+    def _cmd_help(self) -> None:
+        """Display the slash-command reference."""
+        self._write_system(
+            "Commands:\n"
+            "  /help                 Show this help\n"
+            "  /tools                List tools exposed by the MCP server\n"
+            "  /task <id>             Shorthand for: status of task <id>\n"
+            "  /json                 Show full raw server JSON for last response\n"
+            "  /tracing              Show timing + trace spans for last request\n"
+            "  /history              Show turns currently held in context memory\n"
+            "  /plugin <id>          Switch plugin (affects banner tool name)\n"
+            "  /debug on|off         Toggle debug (shows tool calls + raw results)\n"
+            "  /clear                Clear transcript and reset context memory\n"
+            "  /exit, /quit          Exit the app\n"
+            "\n"
+            "Tip: Use PageUp/PageDown to scroll. To copy text, hold Option (macOS) or\n"
+            "     Shift (Linux/Windows) while selecting with the mouse.\n"
+            "Use --no-inline to use the alternate screen."
+        )
+
+    async def _cmd_tools(self) -> None:
+        """Refresh and display the list of tools registered on the MCP server."""
+        if self._mcp_ready:
+            await self._refresh_tools()
+        if not self.tool_names:
+            self._write_system("No tools returned by server.")
+            return
+        body = "\n".join(f"- `{n}`" for n in self.tool_names)
+        self._write_panel(Markdown(body), title=f"{_now()}  tools")
+
+    async def _cmd_plugin(self, args: List[str]) -> None:
+        """Switch the active plugin and reload banner and tools.
+
+        Args:
+            args (List[str]): Remaining command tokens; first element is the
+                new plugin ID when present.
+        """
+        if not args:
+            self._write_system(f"Current plugin: {self.plugin_id}")
+            return
+        self.plugin_id = args[0]
+        if self._mcp_ready:
+            await self._refresh_tools()
+            self._detect_answer_tool()
+            await self._load_banner()
+            self._render_banner()
+        else:
+            self._render_banner_placeholder()
+        self._write_system(f"Switched plugin to: {self.plugin_id}")
+
+    def _cmd_debug(self, args: List[str]) -> None:
+        """Toggle or explicitly set debug mode.
+
+        Args:
+            args (List[str]): Remaining command tokens; first element may be
+                ``"on"`` or ``"off"``.
+        """
+        if args and args[0].lower() in ("on", "off"):
+            self.debug_mode = args[0].lower() == "on"
+        else:
+            self.debug_mode = not self.debug_mode
+        self._write_system(f"Debug {'ON' if self.debug_mode else 'OFF'}.")
+
+    def _handle_history_command(self) -> None:
+        """Render the current in-context conversation turns as a Rich table.
+
+        Shows each turn's role, a character count, and a truncated preview of
+        the content.  Useful for debugging follow-up resolution and verifying
+        that the history cap is working as expected.
+        """
+        if not self._history:
+            turns_word = "turn" if _MAX_HISTORY_TURNS == 1 else "turns"
+            self._write_system(
+                f"No conversation history in context yet.\n"
+                f"(Cap: {_MAX_HISTORY_TURNS} {turns_word} = {_MAX_HISTORY_TURNS * 2} messages. "
+                f"Set BAMBOO_HISTORY_TURNS to change.)"
+            )
+            return
+
+        table = Table(
+            show_header=True,
+            header_style="bold",
+            box=None,
+            pad_edge=False,
+            collapse_padding=True,
+        )
+        table.add_column("#", style="dim", no_wrap=True)
+        table.add_column("Role", style="cyan", no_wrap=True)
+        table.add_column("Chars", justify="right", style="yellow", no_wrap=True)
+        table.add_column("Preview", style="")
+
+        for idx, msg in enumerate(self._history, start=1):
+            role = str(msg.get("role", "?"))
+            content = str(msg.get("content", ""))
+            preview = content[:120].replace("\n", " ")
+            if len(content) > 120:
+                preview += "…"
+            table.add_row(str(idx), role, str(len(content)), preview)
+
+        pair_count = len(self._history) // 2
+        remainder = len(self._history) % 2
+        summary = f"{pair_count} complete pair(s)"
+        if remainder:
+            summary += " + 1 pending user turn"
+        summary += f"  |  cap: {_MAX_HISTORY_TURNS} pairs ({_MAX_HISTORY_TURNS * 2} messages)"
+
+        table.add_section()
+        table.add_row("", "[bold]total[/bold]", f"[bold yellow]{len(self._history)}[/bold yellow]", summary)
+
+        self._write_panel(table, title=f"{_now()}  context history", border_style="cyan")
 
     # ------------------------------------------------------------------
     # Tracing helpers

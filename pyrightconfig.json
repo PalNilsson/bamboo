@@ -10,7 +10,9 @@
     "packages/askpanda_epic",
     "packages/askpanda_verarubin"
   ],
-  "pythonVersion": "3.10",
-  "pythonPlatform": "Linux",
-  "typeCheckingMode": "basic"
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Darwin",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none"
 }
