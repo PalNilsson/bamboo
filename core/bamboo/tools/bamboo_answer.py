@@ -1,40 +1,41 @@
 """Bamboo answer tool — ATLAS-focused orchestration.
 
-Routing (in priority order)
-----------------------------
-1. **Job log analysis** — job ID + analysis keywords → ``panda_log_analysis``
-   → LLM synthesis.
-2. **Job status** — bare job ID → ``panda_job_status`` → LLM synthesis.
-3. **Task status** — task ID → ``panda_task_status`` → LLM synthesis.
-4. **General / fallback** — no recognised ID → ``panda_doc_search`` (RAG)
-   → LLM synthesis.  The retrieved context is injected into the prompt so
-   the LLM answers from documentation rather than parametric memory.  If
-   the RAG tool is unavailable or returns no hits the LLM is still called
-   with a clear note that no documentation context was found.
+Routing (delegated to LLM planner)
+------------------------------------
+The original regex-based ``_route()`` dispatch has been replaced with a call
+to :mod:`bamboo.tools.planner` (``bamboo_plan`` with ``execute=True``).
+
+The planner receives:
+  * the user question,
+  * structured *hint* values extracted by the legacy regex helpers, and
+  * the full conversation history,
+
+and returns a synthesised natural-language answer via
+:mod:`bamboo.tools.bamboo_executor`.
+
+The regex hint-extractors (``_extract_task_id``, ``_extract_job_id``,
+``_is_log_analysis_request``) are kept because they improve planner accuracy —
+they do **not** drive routing decisions any more.
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import re
 from typing import Any
 
-from bamboo.llm.exceptions import LLMConfigError, LLMError, LLMRateLimitError, LLMTimeoutError
+from bamboo.llm.exceptions import LLMError
 from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, coerce_messages, text_content
-from bamboo.tools.doc_rag import panda_doc_search_tool
-from bamboo.tools.doc_bm25 import panda_doc_bm25_tool
-from bamboo.tools.topic_guard import check_topic
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
-from bamboo.tools.task_status import panda_task_status_tool
-from bamboo.tools.job_status import panda_job_status_tool  # type: ignore[import-untyped]
-from bamboo.tools.log_analysis import panda_log_analysis_tool  # type: ignore[import-untyped]
-from bamboo.tracing import (
-    EVENT_GUARD,
-    EVENT_RETRIEVAL,
-    EVENT_SYNTHESIS,
-    span,
+from bamboo.tools.bamboo_executor import execute_plan
+from bamboo.tools.planner import (
+    bamboo_plan_tool,
+    Plan,
+    PlanRoute,
+    ReusePolicy,
+    ToolCall,
 )
+from bamboo.tools.topic_guard import check_topic
+from bamboo.tracing import EVENT_GUARD, span
 
 # Matches "task 123", "task:123", "task-123" etc. (4-12 digits)
 _TASK_PATTERN = re.compile(r"(?i)\btask[:#/\-\s]+([0-9]{4,12})\b")
@@ -95,282 +96,13 @@ def _is_log_analysis_request(text: str) -> bool:
     return bool(_LOG_PATTERN.search(text or ""))
 
 
-def _compact(obj: Any, limit: int = 6000) -> str:
-    """Compact JSON for prompts, bounded to ``limit`` characters."""
-    try:
-        s = json.dumps(obj, ensure_ascii=False, sort_keys=True)
-    except Exception:  # pylint: disable=broad-exception-caught
-        s = str(obj)
-    if len(s) > limit:
-        return s[:limit] + "…(truncated)"
-    return s
-
-
-def _is_bigpanda_error(evidence: Any) -> bool:
-    """Return True if evidence indicates an upstream BigPanDA / tool error.
-
-    Args:
-        evidence: Evidence dict (typically from panda_task_status_tool).
-
-    Returns:
-        True if the evidence indicates an error or not-found condition.
-    """
-    if not isinstance(evidence, dict):
-        return False
-    if evidence.get("not_found") is True:
-        return True
-    if evidence.get("non_json") is True:
-        return True
-    if evidence.get("json_error"):
-        return True
-    http_status = evidence.get("http_status")
-    if isinstance(http_status, int) and http_status >= 400:
-        return True
-    if isinstance(http_status, str) and http_status.isdigit() and int(http_status) >= 400:
-        return True
-    if evidence.get("exception"):
-        return True
-    err = evidence.get("error")
-    if isinstance(err, str) and err.strip():
-        return True
-    return False
-
-
-def _extract_raw_preview(tool_result: Any, evidence: Any, limit: int = 2000) -> str | None:
-    """Best-effort extraction of raw upstream response text for error display.
-
-    Args:
-        tool_result: Full tool result returned by panda_task_status_tool.
-        evidence: Evidence dict.
-        limit: Max characters to include.
-
-    Returns:
-        Preview string or None if nothing useful was found.
-    """
-    candidates: list[str] = []
-
-    def _add_from(d: Any) -> None:
-        if not isinstance(d, dict):
-            return
-        for key in ("raw", "raw_text", "raw_body", "response_text", "body",
-                    "text", "html", "content", "error_body", "detail", "message"):
-            val = d.get(key)
-            if isinstance(val, bytes):
-                try:
-                    val = val.decode("utf-8", errors="replace")
-                except Exception:  # pylint: disable=broad-exception-caught
-                    val = str(val)
-            if isinstance(val, str) and val.strip():
-                candidates.append(val.strip())
-
-    _add_from(tool_result)
-    _add_from(evidence)
-    if isinstance(tool_result, dict):
-        _add_from(tool_result.get("upstream"))
-        _add_from(tool_result.get("response"))
-        _add_from(tool_result.get("error"))
-
-    if not candidates:
-        return None
-    s = candidates[0]
-    if len(s) > limit:
-        s = s[:limit] + "…(truncated)"
-    return s
-
-
-def _extract_delegated_text(delegated: Any) -> str:
-    """Extract the text body from a delegated bamboo_llm_answer_tool result.
-
-    Args:
-        delegated: Raw return value from ``bamboo_llm_answer_tool.call()``.
-
-    Returns:
-        Plain text string from the first content block.
-    """
-    if delegated and isinstance(delegated[0], dict):
-        return str(delegated[0].get("text", ""))
-    return str(delegated)
-
-
-def _unpack_tool_result(result: list[MCPContent]) -> dict[str, Any]:
-    """Deserialise a JSON-wrapped MCPContent result from an internal tool.
-
-    Internal tools (job_status, log_analysis, task_status) return a
-    one-element ``list[MCPContent]`` whose ``text`` field contains the
-    JSON-serialised ``{evidence, text}`` dict.  This helper unpacks that
-    layer so callers can access ``result.get("evidence", ...)`` as before.
-
-    Falls back to an empty dict if the result cannot be parsed, so callers
-    always receive a dict regardless of upstream errors.
-
-    Args:
-        result: Raw return value from an internal tool ``call()`` method.
-
-    Returns:
-        Deserialised dict, or ``{}`` on parse failure.
-    """
-    try:
-        if result and isinstance(result[0], dict):
-            text = result[0].get("text", "")
-            if isinstance(text, str) and text.strip().startswith("{"):
-                return json.loads(text)  # type: ignore[no-any-return]
-    except Exception:  # pylint: disable=broad-exception-caught
-        pass
-    return {}
-
-
-async def _call_llm(
-    system: str,
-    user: str,
-    history: list[Message] | None = None,
-) -> str:
-    """Call the default LLM with a system + user prompt and return the text.
-
-    Prior conversation turns (``history``) are inserted between the system
-    prompt and the synthesised user message so the model can resolve follow-up
-    questions.  History should contain **raw** question/answer pairs, not the
-    synthesised prompts that embed retrieved context or task JSON.
-
-    Args:
-        system: System prompt string.
-        user: Synthesised user prompt for the current turn.
-        history: Optional list of prior ``{role, content}`` turns to inject
-            between the system prompt and the current user message.  Must
-            contain only ``"user"`` and ``"assistant"`` roles.
-
-    Returns:
-        LLM response text.
-    """
-    messages: list[Message] = [{"role": "system", "content": system}]
-    if history:
-        messages.extend(history)
-    messages.append({"role": "user", "content": user})
-
-    delegated = await bamboo_llm_answer_tool.call({
-        "messages": messages,
-        "max_tokens": 2048,
-    })
-    return _extract_delegated_text(delegated)
-
-
-# ---------------------------------------------------------------------------
-# RAG retrieval helpers (module-level so they are not re-defined per-call)
-# ---------------------------------------------------------------------------
-
-_NO_CONTEXT_SIGNALS: tuple[str, ...] = (
-    "not installed",
-    "chromadb path not found",
-    "failed to connect",
-    "no results found",
-    "no keyword matches",
-    "required and must not be empty",
-)
-
-
-def _extract_rag_context(result: object) -> str:
-    """Return text from a retrieval tool result if it contains useful context.
-
-    Args:
-        result: Raw return value from a retrieval tool call.
-
-    Returns:
-        Extracted text string, or empty string if the result is an error or
-        contains a no-context signal on its first line.
-    """
-    if isinstance(result, Exception) or not result:
-        return ""
-    if not isinstance(result, list) or not isinstance(result[0], dict):
-        return ""
-    text = str(result[0].get("text", ""))
-    first_line = text.split("\n")[0].lower()
-    if any(s in first_line for s in _NO_CONTEXT_SIGNALS):
-        return ""
-    return text
-
-
-def _rag_hit_count(result: object, context: str) -> int:
-    """Return the number of non-empty result lines, or -1 on retrieval error.
-
-    Args:
-        result: Raw return value from a retrieval tool call.
-        context: Extracted context string for this result.
-
-    Returns:
-        Number of non-empty lines in the context, or -1 if the result was an
-        exception.
-    """
-    if isinstance(result, Exception):
-        return -1
-    return len([ln for ln in context.splitlines() if ln.strip()])
-
-
-async def _run_vector_search(question: str) -> str:
-    """Run vector search inside its own tracing span.
-
-    Args:
-        question: User question to search for.
-
-    Returns:
-        Extracted context string, or empty string on failure.
-    """
-    async with span(EVENT_RETRIEVAL, tool="panda_doc_search", backend="vector") as _s:
-        try:
-            result = await panda_doc_search_tool.call({"query": question, "top_k": 20})
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            result = exc  # type: ignore[assignment]
-        ctx = _extract_rag_context(result)
-        _s.set(hits=_rag_hit_count(result, ctx))
-    return ctx
-
-
-async def _run_bm25_search(question: str) -> str:
-    """Run BM25 keyword search inside its own tracing span.
-
-    Args:
-        question: User question to search for.
-
-    Returns:
-        Extracted context string, or empty string on failure.
-    """
-    async with span(EVENT_RETRIEVAL, tool="panda_doc_bm25", backend="bm25") as _s:
-        try:
-            result = await panda_doc_bm25_tool.call({"query": question, "top_k": 10})
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            result = exc  # type: ignore[assignment]
-        ctx = _extract_rag_context(result)
-        _s.set(hits=_rag_hit_count(result, ctx))
-    return ctx
-
-
-async def _retrieve_rag_context(question: str) -> str:
-    """Run vector and BM25 searches concurrently and merge results.
-
-    Args:
-        question: User question to retrieve context for.
-
-    Returns:
-        Merged context string, or empty string if both searches fail or return
-        no useful content.
-    """
-    try:
-        vec_ctx, bm25_ctx = await asyncio.gather(
-            _run_vector_search(question),
-            _run_bm25_search(question),
-        )
-        if vec_ctx and bm25_ctx:
-            return f"{vec_ctx}\n\n--- Keyword search results ---\n{bm25_ctx}"
-        return vec_ctx or bm25_ctx
-    except Exception:  # pylint: disable=broad-exception-caught
-        return ""  # retrieval failure is non-fatal
-
-
 def _extract_history(messages: list[Message], current_question: str) -> list[Message]:
     """Extract prior conversation turns from a full messages list.
 
     The current question (last user message) is excluded so it is not
-    duplicated when the synthesised user prompt is appended by ``_call_llm``.
+    duplicated when the synthesised user prompt is appended by the executor.
     Only ``"user"`` and ``"assistant"`` role messages are kept; ``"system"``
-    messages from the client are dropped because ``_call_llm`` builds its own
+    messages from the client are dropped because the executor builds its own
     system prompt.
 
     Only the **last** user turn whose content matches ``current_question`` is
@@ -379,13 +111,13 @@ def _extract_history(messages: list[Message], current_question: str) -> list[Mes
 
     Args:
         messages: Full coerced chat history including the current turn.
-        current_question: The question that was derived from the last user
-            message, used to identify and strip the final user turn.
+        current_question: The question derived from the last user message,
+            used to identify and strip the final user turn.
 
     Returns:
         List of prior ``{role, content}`` Message dicts in chronological
-        order, suitable for passing as the ``history`` argument to
-        ``_call_llm``.
+        order, suitable for passing as the ``history`` argument to the
+        synthesis LLM call.
     """
     allowed_roles = {"user", "assistant"}
     # Find the index of the *last* user turn that matches current_question.
@@ -414,9 +146,6 @@ def _extract_history(messages: list[Message], current_question: str) -> list[Mes
 def _friendly_llm_error(exc: LLMError) -> str:
     """Return a concise, user-readable explanation of an LLM provider error.
 
-    Inspects the exception type and message to produce actionable advice
-    rather than exposing raw SDK internals to the user.
-
     Args:
         exc: An :class:`~bamboo.llm.exceptions.LLMError` subclass instance.
 
@@ -424,56 +153,57 @@ def _friendly_llm_error(exc: LLMError) -> str:
         A plain-text string suitable for display in the TUI or returned as
         tool output.
     """
+    from bamboo.llm.exceptions import (  # pylint: disable=import-outside-toplevel
+        LLMConfigError, LLMRateLimitError, LLMTimeoutError,
+    )
+
     raw = str(exc)
 
     if isinstance(exc, LLMConfigError):
         return (
-            "⚙️  LLM not configured — check your API key environment variables "
+            "\u2699\ufe0f  LLM not configured — check your API key environment variables "
             "(e.g. MISTRAL_API_KEY, OPENAI_API_KEY) and restart the server."
         )
 
     if isinstance(exc, LLMRateLimitError):
         return (
-            "⏳  Rate limit reached on the LLM provider. "
+            "\u23f3  Rate limit reached on the LLM provider. "
             "Please wait a moment and try again."
         )
 
     if isinstance(exc, LLMTimeoutError):
         return (
-            "⏱️  The LLM provider did not respond in time. "
+            "\u23f1\ufe0f  The LLM provider did not respond in time. "
             "This is usually transient — please try again in a moment."
         )
 
-    # Classify common transient HTTP conditions by message content.
     raw_lower = raw.lower()
     _overload_signals = ("503", "502", "overflow", "overloaded",
                          "upstream connect error", "reset before headers",
                          "reset reason")
     if any(s in raw_lower for s in _overload_signals):
         return (
-            "🔄  The LLM provider is temporarily overloaded (service unavailable). "
+            "\U0001f504  The LLM provider is temporarily overloaded (service unavailable). "
             "This is not a problem with your question — please try again in a few seconds."
         )
     if any(s in raw_lower for s in ("429", "rate limit", "rate_limit", "too many requests")):
         return (
-            "⏳  Rate limit reached on the LLM provider. "
+            "\u23f3  Rate limit reached on the LLM provider. "
             "Please wait a moment and try again."
         )
     _auth_signals = ("401", "403", "unauthorized", "forbidden", "invalid api key",
                      "authentication")
     if any(s in raw_lower for s in _auth_signals):
         return (
-            "🔑  Authentication failed with the LLM provider. "
+            "\U0001f511  Authentication failed with the LLM provider. "
             "Check that your API key is correct and has not expired."
         )
     if any(s in raw_lower for s in ("timeout", "timed out", "deadline")):
         return (
-            "⏱️  The request to the LLM provider timed out. "
+            "\u23f1\ufe0f  The request to the LLM provider timed out. "
             "This is usually transient — please try again."
         )
 
-    # Generic provider error — include a sanitised excerpt of the raw message
-    # (strip the redundant "Mistral error after retries: " prefix if present).
     _known_prefixes = (
         "mistral error after retries: ",
         "openai error after retries: ",
@@ -487,24 +217,158 @@ def _friendly_llm_error(exc: LLMError) -> str:
         if raw_lower.startswith(prefix):
             raw = raw[len(prefix):]
             break
-    # Keep it short — the full SDK traceback is not useful to a user.
-    excerpt = raw[:200] + ("…" if len(raw) > 200 else "")
+    excerpt = raw[:200] + ("\u2026" if len(raw) > 200 else "")
     return (
-        f"⚠️  The LLM provider returned an error: {excerpt}\n"
+        f"\u26a0\ufe0f  The LLM provider returned an error: {excerpt}\n"
         "This may be transient — please try again. "
         "If the problem persists, check the server logs."
     )
 
 
+def _build_deterministic_plan(
+    question: str,
+    task_id: int | None,
+    job_id: int | None,
+) -> "Plan | None":
+    """Build a Plan without an LLM call for unambiguous routing cases.
+
+    Returns a validated Plan for the four clear-cut routes, or ``None`` when
+    the question is ambiguous enough to need the LLM planner.
+
+    Fast-path rules (in priority order):
+    1. Job ID + analysis keywords → ``panda_log_analysis`` FAST_PATH
+    2. Job ID (no task ID)        → ``panda_job_status``    FAST_PATH
+    3. Task ID                    → ``panda_task_status``   FAST_PATH
+    4. No IDs                     → ``panda_doc_search`` + ``panda_doc_bm25`` RETRIEVE
+
+    Args:
+        question: User question text.
+        task_id: Extracted task ID, or None.
+        job_id: Extracted job ID, or None.
+
+    Returns:
+        A validated :class:`~bamboo.tools.planner.Plan`, or ``None`` to
+        signal that the LLM planner should be used instead.
+    """
+    reuse = ReusePolicy()
+
+    if job_id and _is_log_analysis_request(question):
+        return Plan(
+            route=PlanRoute.FAST_PATH,
+            confidence=1.0,
+            tool_calls=[ToolCall(
+                tool="panda_log_analysis",
+                arguments={"job_id": job_id, "query": question, "context": ""},
+            )],
+            reuse_policy=reuse,
+            explain="Deterministic: job ID + analysis keywords → log analysis.",
+        )
+
+    if job_id and not task_id:
+        return Plan(
+            route=PlanRoute.FAST_PATH,
+            confidence=1.0,
+            tool_calls=[ToolCall(
+                tool="panda_job_status",
+                arguments={"job_id": job_id, "query": question},
+            )],
+            reuse_policy=reuse,
+            explain="Deterministic: job ID, no task ID → job status.",
+        )
+
+    if task_id:
+        return Plan(
+            route=PlanRoute.FAST_PATH,
+            confidence=1.0,
+            tool_calls=[ToolCall(
+                tool="panda_task_status",
+                arguments={"task_id": task_id, "query": question, "include_jobs": True},
+            )],
+            reuse_policy=reuse,
+            explain="Deterministic: task ID present → task status.",
+        )
+
+    # No IDs: general knowledge / documentation question → always retrieve.
+    # top_k=5 for both to keep synthesis prompt within ~2500 input tokens,
+    # well clear of the 30s TUI timeout even on follow-up turns with history.
+    return Plan(
+        route=PlanRoute.RETRIEVE,
+        confidence=1.0,
+        tool_calls=[
+            ToolCall(
+                tool="panda_doc_search",
+                arguments={"query": question, "top_k": 5},
+            ),
+            ToolCall(
+                tool="panda_doc_bm25",
+                arguments={"query": question, "top_k": 5},
+            ),
+        ],
+        reuse_policy=reuse,
+        explain="Deterministic: no task/job ID → RAG retrieval.",
+    )
+
+
+# Matches content-free follow-up phrases that carry no domain information.
+# When matched (and history is present), we skip the LLM guard and substitute
+# the last meaningful user question as the RAG query.
+_FOLLOWUP_PATTERN = re.compile(
+    r"^(please\s+)?(tell me more|explain more|more details?|elaborate|"
+    r"go on|continue|explain further|can you expand|"
+    r"more information|more info|say more|more)"
+    r"(\s+please)?\s*[.!?]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_content_free_followup(question: str) -> bool:
+    """Return True if the question carries no domain-specific content.
+
+    Content-free follow-ups like "Tell me more please" or "Elaborate" cannot
+    be used as meaningful RAG queries and should not trigger the LLM topic
+    guard — they are trivially on-topic when history is present.
+
+    Args:
+        question: The user's question text.
+
+    Returns:
+        True if the question matches a known content-free follow-up pattern.
+    """
+    return bool(_FOLLOWUP_PATTERN.match(question.strip()))
+
+
+def _last_user_question(history: list[Message]) -> str | None:
+    """Return the most recent user message from history, or None.
+
+    Args:
+        history: Prior conversation turns (user/assistant pairs).
+
+    Returns:
+        Content of the last user-role message, or None if history is empty
+        or contains no user messages.
+    """
+    for msg in reversed(history):
+        if msg.get("role") == "user":
+            content = str(msg.get("content", "")).strip()
+            if content:
+                return content
+    return None
+
+
 class BambooAnswerTool:
-    """MCP tool for answering questions about ATLAS tasks using LLM and task metadata."""
+    """MCP tool that answers questions about ATLAS PanDA tasks and jobs.
+
+    Uses the LLM planner (``bamboo_plan`` with ``execute=True``) for
+    routing and synthesis, replacing the previous regex-dispatch approach.
+    The topic guard and ``bypass_routing`` path are preserved intact.
+    """
 
     @staticmethod
     def get_definition() -> dict[str, Any]:
-        """Return the MCP tool definition for bamboo_answer.
+        """Return the MCP tool definition for ``bamboo_answer``.
 
         Returns:
-            Tool definition dict.
+            Tool definition dict compatible with MCP discovery.
         """
         return {
             "name": "bamboo_answer",
@@ -559,12 +423,11 @@ class BambooAnswerTool:
         }
 
     async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:
-        """Handle bamboo_answer tool invocation with optional task context.
+        """Handle bamboo_answer tool invocation.
 
-        LLM provider errors (overloaded service, rate limits, auth failures,
-        timeouts) are caught and returned as a friendly user-readable message
-        rather than propagated as exceptions — tools must always return a
-        result.
+        LLM provider errors are caught and returned as a friendly user-readable
+        message rather than propagated as exceptions — tools must always return
+        a result.
 
         Args:
             arguments: Tool arguments.
@@ -612,21 +475,26 @@ class BambooAnswerTool:
         include_jobs: bool,
         include_raw: bool,
     ) -> list[MCPContent]:
-        """Dispatch to the appropriate synthesis method based on question content.
+        """Route the question to the appropriate synthesis path.
+
+        The ``bypass_routing`` path passes the question directly to the LLM
+        without any tool calls.  All other questions are routed through the
+        planner with ``execute=True``, which selects tools, executes them, and
+        synthesises a grounded answer.
 
         Args:
             question: Extracted or derived user question string.
             history: Prior conversation turns (user/assistant pairs) excluding
-                the current question, ready to be threaded into ``_call_llm``.
-            bypass_routing: Skip ID extraction and go directly to the LLM.
-            include_jobs: Pass ``?jobs=1`` when fetching task metadata.
-            include_raw: Append raw BigPanDA response snippet on errors.
+                the current question.
+            bypass_routing: If True, skip routing and delegate directly to the
+                LLM passthrough tool.
+            include_jobs: Passed as a hint to the planner for task-status calls.
+            include_raw: Passed as a hint to the planner for error formatting.
 
         Returns:
             List[MCPContent]: One-element MCP text content list.
         """
         if bypass_routing:
-            # Bypass path already uses the full messages list directly.
             msgs: list[Message] = []
             if history:
                 msgs.extend(history)
@@ -634,294 +502,80 @@ class BambooAnswerTool:
             delegated = await bamboo_llm_answer_tool.call(
                 {"messages": msgs} if msgs else {"question": question}
             )
-            return text_content(_extract_delegated_text(delegated))
+            if delegated and isinstance(delegated[0], dict):
+                return text_content(str(delegated[0].get("text", "")))
+            return text_content(str(delegated))
 
-        # Topic guard must run before any tool or LLM call.
-        async with span(EVENT_GUARD, tool="topic_guard") as _guard_span:
-            guard = await check_topic(question)
-            _guard_span.set(
-                allowed=guard.allowed,
-                reason=guard.reason,
-                llm_used=guard.llm_used,
-            )
-        if not guard.allowed:
-            return text_content(guard.rejection_message)
+        # Content-free follow-ups ("Tell me more", "Elaborate") are trivially
+        # on-topic when history is present — skip the LLM guard to save ~400ms
+        # and substitute the last real question as the RAG query.
+        rag_query = question
+        if history and _is_content_free_followup(question):
+            prior = _last_user_question(history)
+            if prior:
+                rag_query = prior
+            # Skip the guard entirely — a follow-up in an active conversation
+            # cannot be off-topic by definition.
+            async with span(EVENT_GUARD, tool="topic_guard") as _guard_span:
+                _guard_span.set(allowed=True, reason="followup_allow", llm_used=False)
+        else:
+            # Topic guard must run before any tool or LLM call.
+            async with span(EVENT_GUARD, tool="topic_guard") as _guard_span:
+                guard = await check_topic(question)
+                _guard_span.set(
+                    allowed=guard.allowed,
+                    reason=guard.reason,
+                    llm_used=guard.llm_used,
+                )
+            if not guard.allowed:
+                return text_content(guard.rejection_message)
 
+        # Extract structured hints — these drive fast-path routing and also
+        # improve accuracy when the LLM planner is needed as a fallback.
         task_id = _extract_task_id(question)
         job_id = _extract_job_id(question)
 
-        if job_id and _is_log_analysis_request(question):
-            return await self._synthesise_log_analysis(question, job_id, history)
-        if job_id and not task_id:
-            return await self._synthesise_job(question, job_id, include_raw, history)
-        if not task_id:
-            return await self._synthesise_rag(question, history)
-        return await self._synthesise_task(question, task_id, include_jobs, include_raw, history)
-
-    async def _synthesise_log_analysis(
-        self, question: str, job_id: int, history: list[Message]
-    ) -> list[MCPContent]:
-        """Fetch job log analysis and synthesise a diagnostic answer.
-
-        Args:
-            question: Original user question.
-            job_id: Extracted PanDA job ID.
-            history: Prior conversation turns to inject into the LLM prompt.
-
-        Returns:
-            List[MCPContent]: One-element MCP text content list.
-        """
-        raw_result = await panda_log_analysis_tool.call({
-            "job_id": job_id,
-            "query": question,
-            "context": "",
-        })
-        tool_result = _unpack_tool_result(raw_result)
-        evidence = tool_result.get("evidence", tool_result)
-        system = (
-            "You are AskPanDA for the ATLAS experiment.\n"
-            "Given a user's question and a JSON evidence object containing PanDA job "
-            "log analysis, write a concise diagnostic answer.\n"
-            "Rules:\n"
-            "- State the failure classification clearly.\n"
-            "- Quote relevant log excerpts if present.\n"
-            "- Suggest concrete next steps based on the failure type.\n"
-            "- Include the BigPanDA monitor link.\n"
-            "- Keep it under ~10 bullet points.\n"
-        )
-        user = f"User question:\n{question}\n\nEvidence JSON:\n{_compact(evidence)}\n"
-        async with span(EVENT_SYNTHESIS, tool="bamboo_answer", route="log_analysis"):
-            body = await _call_llm(system, user, history)
-        return text_content(body)
-
-    async def _synthesise_job(
-        self, question: str, job_id: int, include_raw: bool, history: list[Message]
-    ) -> list[MCPContent]:
-        """Fetch job status and synthesise a concise status answer.
-
-        Args:
-            question: Original user question.
-            job_id: Extracted PanDA job ID.
-            include_raw: Append raw BigPanDA response preview on errors.
-            history: Prior conversation turns to inject into the LLM prompt.
-
-        Returns:
-            List[MCPContent]: One-element MCP text content list.
-        """
-        raw_result = await panda_job_status_tool.call({
-            "job_id": job_id,
-            "query": question,
-        })
-        tool_result = _unpack_tool_result(raw_result)
-        evidence = tool_result.get("evidence", tool_result)
-        is_error = _is_bigpanda_error(evidence)
-        raw_preview = _extract_raw_preview(tool_result, evidence) if is_error and include_raw else None
-        system = (
-            "You are AskPanDA for the ATLAS experiment.\n"
-            "Given a user's question and a JSON evidence object from BigPanDA, "
-            "write a concise, helpful answer about the job status.\n"
-            "Rules:\n"
-            "- If evidence.not_found is true: say the job was not found and suggest "
-            "checking the ID.\n"
-            "- Otherwise: summarise status, site, queue, pilot error, and timing.\n"
-            "- Always include the BigPanDA monitor URL as plain text (not a Markdown "
-            "hyperlink), e.g.: Monitor: https://bigpanda.cern.ch/job/12345/\n"
-            "- Keep it under ~8 bullet points.\n"
-        )
-        user = f"User question:\n{question}\n\nEvidence JSON:\n{_compact(evidence)}\n"
-        if raw_preview:
-            system += "\nOn error, include the Raw response preview verbatim at the end inside a fenced code block.\n"
-            user += f"\nRaw response preview:\n{raw_preview}\n"
-        async with span(EVENT_SYNTHESIS, tool="bamboo_answer", route="job"):
-            body = await _call_llm(system, user, history)
-        if raw_preview and "Raw response preview" not in body:
-            body = f"{body.rstrip()}\n\nRaw response preview:\n```text\n{raw_preview}\n```\n"
-        return text_content(body)
-
-    async def _synthesise_rag(self, question: str, history: list[Message]) -> list[MCPContent]:
-        """Retrieve documentation context and synthesise a grounded answer.
-
-        Runs vector and BM25 retrieval concurrently, then calls the LLM with
-        the merged context.  If retrieval fails or returns nothing, the LLM is
-        still called with an explicit note that no documentation was found.
-
-        Args:
-            question: Original user question.
-            history: Prior conversation turns to inject into the LLM prompt.
-
-        Returns:
-            List[MCPContent]: One-element MCP text content list.
-        """
-        rag_context = await _retrieve_rag_context(question)
-
-        if rag_context:
-            system = (
-                "You are AskPanDA, an expert assistant for the PanDA workload management "
-                "system and ATLAS experiment workflows at CERN.\n"
-                "You are given a user question and relevant excerpts retrieved from the "
-                "PanDA/Bamboo documentation knowledge base.\n"
-                "Rules:\n"
-                "- Base your answer primarily on the retrieved documentation excerpts.\n"
-                "- If the excerpts fully answer the question, do not add unreferenced claims.\n"
-                "- If the excerpts are only partially relevant, supplement with your general "
-                "knowledge but clearly distinguish what comes from documentation vs. general "
-                "knowledge.\n"
-                "- Be concise and precise. Prefer bullet points for multi-part answers.\n"
-                "- Do not fabricate PanDA-specific details (task IDs, queue names, error "
-                "codes) that are not in the excerpts.\n"
+        # --- Fast-path: build the plan deterministically for unambiguous cases ---
+        # This eliminates the planner LLM call (~6-7s) for the most common routes
+        # and avoids the 30s TUI timeout on follow-up questions.
+        # For content-free follow-ups, rag_query holds the last real question
+        # so retrieval targets meaningful content rather than "tell me more".
+        fast_plan = _build_deterministic_plan(rag_query, task_id, job_id)
+        if fast_plan is not None:
+            # Pass original_question only when it differs from rag_query — i.e.
+            # when a content-free follow-up was reformulated. This signals
+            # _build_synthesis_prompt to use expansion framing instead of
+            # answer framing. On first-turn questions rag_query == question
+            # so original_question is None and normal framing is used.
+            original_question = question if rag_query != question else None
+            return await execute_plan(
+                fast_plan, rag_query, history,
+                original_question=original_question,
             )
-            user = (
-                f"User question:\n{question}\n\n"
-                f"Retrieved documentation excerpts:\n{rag_context}\n"
-            )
-        else:
-            system = (
-                "You are AskPanDA, an expert assistant for the PanDA workload management "
-                "system and ATLAS experiment workflows at CERN.\n"
-                "No relevant documentation excerpts were found for this question.\n"
-                "Rules:\n"
-                "- Do NOT answer from general knowledge or make up any PanDA-specific "
-                "details such as error codes, queue names, or configuration values.\n"
-                "- Tell the user that the documentation knowledge base did not contain "
-                "enough information to answer this question reliably.\n"
-                "- Suggest they consult the official PanDA documentation or BigPanDA "
-                "monitor directly.\n"
-                "- If you can point to a plausible documentation URL or resource name, "
-                "do so — but do not invent specific technical values.\n"
-            )
-            user = f"User question:\n{question}\n"
 
-        async with span(EVENT_SYNTHESIS, tool="bamboo_answer", route="rag"):
-            body = await _call_llm(system, user, history)
-        return text_content(body)
+        # --- LLM planner fallback for ambiguous or multi-step questions ---
+        hints: dict[str, Any] = {}
+        if task_id:
+            hints["task_id"] = task_id
+        if job_id:
+            hints["job_id"] = job_id
+        if include_jobs:
+            hints["include_jobs"] = True
+        if include_raw:
+            hints["include_raw"] = True
 
-    async def _synthesise_task(
-        self, question: str, task_id: int, include_jobs: bool, include_raw: bool,
-        history: list[Message]
-    ) -> list[MCPContent]:
-        """Fetch task metadata and synthesise an answer grounded in it.
+        plan_args: dict[str, Any] = {
+            "question": question,
+            "execute": True,
+            "messages": [
+                *history,
+                {"role": "user", "content": question},
+            ],
+        }
+        if hints:
+            plan_args["hints"] = hints
 
-        Args:
-            question: Original user question.
-            task_id: Extracted PanDA task ID.
-            include_jobs: Pass ``?jobs=1`` to the task status tool.
-            include_raw: Append raw BigPanDA response preview on errors.
-            history: Prior conversation turns to inject into the LLM prompt.
-
-        Returns:
-            List[MCPContent]: One-element MCP text content list.
-        """
-        raw_result = await panda_task_status_tool.call({
-            "task_id": task_id,
-            "query": question,
-            "include_jobs": include_jobs,
-        })
-        tool_result = _unpack_tool_result(raw_result)
-        evidence = tool_result.get("evidence", tool_result)
-        is_error = _is_bigpanda_error(evidence)
-        raw_preview = _extract_raw_preview(tool_result, evidence) if is_error else None
-
-        system = (
-            "You are AskPanDA, an assistant for the ATLAS experiment at CERN.\n"
-            "You are given a user question and JSON metadata for a PanDA task fetched from BigPanDA.\n"
-            "Answer the user's specific question using only data explicitly present in the metadata.\n"
-            "Rules:\n"
-            "- If evidence.not_found is true or evidence.http_status==404: clearly state that the task ID\n"
-            "  was not found in BigPanDA. Say the task does not exist or the ID is incorrect. Do not\n"
-            "  include a monitor link.\n"
-            "- If evidence indicates a non-JSON or HTTP error (but not 404): explain that BigPanDA returned\n"
-            "  an unexpected response and include the monitor_url so the user can check manually.\n"
-            "- Otherwise: answer the question directly using only fields present in the metadata.\n"
-            "- NEVER infer, guess, or derive values not explicitly in the data. If a requested value is\n"
-            "  absent, say it is not available in the metadata rather than inventing it.\n"
-            "- The Job list section below the metadata lists actual PanDA job IDs. Use ONLY those IDs\n"
-            "  when answering questions about pandaids/job IDs. If the section says no jobs were\n"
-            "  returned, say so — never derive job IDs from dataset IDs or any other field.\n"
-            "- Be concise. Include the BigPanDA monitor URL as plain text at the end in non-error cases,\n"
-            "  e.g.: Monitor: https://bigpanda.cern.ch/task/12345/\n"
-        )
-        if raw_preview and include_raw:
-            system += "\nInclude the raw BigPanDA response snippet verbatim at the end inside a fenced code block.\n"
-
-        user = self._build_task_prompt(question, evidence, raw_preview)
-
-        async with span(EVENT_SYNTHESIS, tool="bamboo_answer", route="task"):
-            body = await _call_llm(system, user, history)
-
-        if raw_preview and include_raw:
-            body = (
-                f"{body.rstrip()}\n\n"
-                "**BigPanDA raw response snippet:**\n"
-                "```text\n"
-                f"{raw_preview}\n"
-                "```\n"
-            )
-        return text_content(body)
-
-    @staticmethod
-    def _build_task_prompt(
-        question: str, evidence: Any, raw_preview: str | None
-    ) -> str:
-        """Build the user prompt for task status synthesis.
-
-        Strips the raw jobs array from the payload and replaces it with a
-        compact pandaid/status list to avoid prompt truncation and LLM
-        hallucination of job IDs.
-
-        Args:
-            question: Original user question.
-            evidence: Evidence dict from panda_task_status_tool.
-            raw_preview: Optional raw response snippet to append.
-
-        Returns:
-            Formatted user prompt string.
-        """
-        payload = evidence.get("payload") if isinstance(evidence, dict) else None
-        if isinstance(payload, dict):
-            _job_keys = ("jobs", "jobList", "joblist", "job_list", "jobSummary")
-            jobs_list = next(
-                (payload.get(k) for k in _job_keys if isinstance(payload.get(k), list)),
-                None,
-            )
-            payload_slim = {k: v for k, v in payload.items() if k not in _job_keys}
-            evidence_for_prompt: Any = payload_slim
-
-            if not jobs_list:
-                job_context = (
-                    "\n\nJob list: No job records were returned for this task."
-                    " Do not infer PanDA job IDs from any other field."
-                )
-            else:
-                pandaids = [
-                    j.get("pandaid") or j.get("PandaID") or j.get("panda_id")
-                    for j in jobs_list if isinstance(j, dict)
-                ]
-                pandaids = [str(p) for p in pandaids if p is not None]
-                statuses = [
-                    j.get("jobStatus") or j.get("status") or ""
-                    for j in jobs_list if isinstance(j, dict)
-                ]
-                job_rows = [
-                    f"  pandaid={pid} status={st}"
-                    for pid, st in zip(pandaids, statuses)
-                ]
-                tail = "\n  …(truncated)" if len(jobs_list) > 200 else ""
-                job_context = (
-                    f"\n\nJob list ({len(jobs_list)} jobs):\n"
-                    f"{chr(10).join(job_rows[:200])}{tail}"
-                )
-        else:
-            evidence_for_prompt = evidence
-            job_context = ""
-
-        user = (
-            f"User question:\n{question}\n"
-            f"\nTask metadata (JSON):\n{_compact(evidence_for_prompt)}"
-            f"{job_context}\n"
-        )
-        if raw_preview:
-            user += f"\nBigPanDA raw response snippet:\n{raw_preview}\n"
-        return user
+        return await bamboo_plan_tool.call(plan_args)
 
 
 bamboo_answer_tool = BambooAnswerTool()

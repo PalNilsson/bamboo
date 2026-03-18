@@ -1,0 +1,31 @@
+flowchart TD
+    A([bamboo_answer called]) --> B
+
+    B{Content-free follow-up?\ne.g. 'Tell me more'}
+    B -- "yes + history present" --> C[Reformulate RAG query\nuse last real question from history]
+    B -- no --> D
+
+    C --> E
+    D[Topic guard\nkeyword check → LLM if ambiguous] -- rejected --> F([Return rejection message])
+    D -- allowed --> E
+
+    E[Deterministic routing — no LLM\nregex extracts task_id · job_id · keywords]
+
+    E --> G[panda_log_analysis\njob_id + failure keywords]
+    E --> H[panda_job_status\njob_id only]
+    E --> I[panda_task_status\ntask_id present]
+    E --> J[panda_doc_search\n+ panda_doc_bm25\nno ID found]
+    E -. fallback .-> K[LLM planner\nbamboo_plan]
+
+    G --> L
+    H --> L
+    I --> L
+    J --> L
+    K -. fallback .-> L
+
+    L[execute_plan]
+    L --> M[LLM synthesis\ncall_llm → natural-language answer]
+    M --> N([Response returned])
+
+    style K fill:#e8e8e8,stroke:#aaa,stroke-dasharray:4 3
+    style K color:#555

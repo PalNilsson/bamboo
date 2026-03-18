@@ -104,6 +104,7 @@ EVENT_GUARD: str = "guard"
 EVENT_RETRIEVAL: str = "retrieval"
 EVENT_LLM_CALL: str = "llm_call"
 EVENT_SYNTHESIS: str = "synthesis"
+EVENT_PLAN: str = "plan"
 
 # ---------------------------------------------------------------------------
 # OpenTelemetry — lazy initialisation
@@ -494,6 +495,7 @@ __all__ = [
     "EVENT_RETRIEVAL",
     "EVENT_LLM_CALL",
     "EVENT_SYNTHESIS",
+    "EVENT_PLAN",
     "SpanContext",
     "span",
     "emit_sync",

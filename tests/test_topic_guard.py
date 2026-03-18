@@ -155,7 +155,6 @@ async def test_bamboo_answer_rejects_offtopic_before_any_tool():
     import bamboo.tools.bamboo_answer as ba_mod
     from bamboo.tools.bamboo_answer import BambooAnswerTool
 
-    rag_mock = AsyncMock()
     llm_mock = AsyncMock()
     guard_mock = AsyncMock(return_value=GuardResult(
         allowed=False,
@@ -164,16 +163,18 @@ async def test_bamboo_answer_rejects_offtopic_before_any_tool():
         rejection_message="I can only answer questions about PanDA.",
     ))
 
+    plan_mock = AsyncMock(return_value=[{"type": "text", "text": "should not reach"}])
     tool = BambooAnswerTool()
     with (
         patch.object(ba_mod, "check_topic", guard_mock),
-        patch.object(ba_mod, "panda_doc_search_tool", AsyncMock(call=rag_mock)),
+        patch.object(ba_mod, "bamboo_plan_tool") as mock_pt,
         patch.object(ba_mod, "bamboo_llm_answer_tool", AsyncMock(call=llm_mock)),
     ):
+        mock_pt.call = plan_mock
         result = await tool.call({"question": "Give me a recipe for pasta"})
 
     guard_mock.assert_awaited_once_with("Give me a recipe for pasta")
-    rag_mock.assert_not_awaited()
+    plan_mock.assert_not_called()
     llm_mock.assert_not_awaited()
     assert "PanDA" in result[0]["text"]
 
@@ -187,19 +188,16 @@ async def test_bamboo_answer_passes_ontopic_through_guard():
     guard_mock = AsyncMock(return_value=GuardResult(
         allowed=True, reason="keyword_allow", llm_used=False
     ))
-    rag_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA Doc Search …\n[1] …"}])
-    llm_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA is the workload manager."}])
-
-    bm25_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA Doc BM25 …"}])
+    plan_mock = AsyncMock(
+        return_value=[{"type": "text", "text": "PanDA is the workload manager."}]
+    )
     tool = BambooAnswerTool()
     with (
         patch.object(ba_mod, "check_topic", guard_mock),
-        patch.object(ba_mod, "panda_doc_search_tool", AsyncMock(call=rag_mock)),
-        patch.object(ba_mod, "panda_doc_bm25_tool", AsyncMock(call=bm25_mock)),
-        patch.object(ba_mod, "bamboo_llm_answer_tool", AsyncMock(call=llm_mock)),
+        patch("bamboo.tools.bamboo_answer.execute_plan", plan_mock),
     ):
         result = await tool.call({"question": "What is PanDA?"})
 
     guard_mock.assert_awaited_once()
-    rag_mock.assert_awaited_once()
+    plan_mock.assert_awaited_once()
     assert "workload manager" in result[0]["text"]

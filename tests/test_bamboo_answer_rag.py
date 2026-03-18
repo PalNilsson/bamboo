@@ -1,147 +1,187 @@
-"""Tests for the RAG-first routing branch in BambooAnswerTool.
+"""Tests for BambooAnswerTool routing after the deterministic fast-path refactor.
 
-These tests cover the "no recognised task/job ID" path introduced to route
-general PanDA knowledge questions through ``panda_doc_search_tool`` before
-handing off to the LLM for synthesis.
-
-All external I/O (RAG tool, LLM passthrough) is monkeypatched so tests run
-fully offline without real ChromaDB or LLM credentials.
+After the refactor, _route() calls _build_deterministic_plan() for all common
+cases and then calls execute_plan() directly — bypassing the LLM planner
+entirely. The planner is only invoked when _build_deterministic_plan returns
+None (which it never currently does; it covers all four cases). Tests mock
+execute_plan at the bamboo.tools.bamboo_answer module level.
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import bamboo.tools.bamboo_answer as ba_mod
-from bamboo.tools.bamboo_answer import BambooAnswerTool
+from bamboo.tools.bamboo_answer import BambooAnswerTool, _build_deterministic_plan
+from bamboo.tools.planner import PlanRoute
+
+
+def _exec_result(text: str) -> list[dict]:
+    """Return a fake execute_plan result (one-element MCPContent list)."""
+    return [{"type": "text", "text": text}]
+
+
+def _mock_guard(allowed: bool = True) -> MagicMock:
+    """Return a mock topic-guard result."""
+    g = MagicMock()
+    g.allowed = allowed
+    g.reason = "ok" if allowed else "off-topic"
+    g.rejection_message = "Off-topic question."
+    g.llm_used = False
+    return g
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# _build_deterministic_plan unit tests
 # ---------------------------------------------------------------------------
 
-def _llm_mock(reply: str) -> AsyncMock:
-    """Return an AsyncMock that simulates bamboo_llm_answer_tool.call."""
-    mock = AsyncMock(return_value=[{"type": "text", "text": reply}])
-    return mock
+
+def test_no_ids_returns_retrieve_plan():
+    """Questions with no IDs produce a RETRIEVE plan with both RAG tools."""
+    plan = _build_deterministic_plan("What is PanDA?", None, None)
+    assert plan is not None
+    assert plan.route == PlanRoute.RETRIEVE
+    assert plan.tool_calls[0].tool == "panda_doc_search"
+    assert plan.tool_calls[1].tool == "panda_doc_bm25"
 
 
-def _rag_mock(text: str) -> AsyncMock:
-    """Return an AsyncMock that simulates panda_doc_search_tool.call."""
-    mock = AsyncMock(return_value=[{"type": "text", "text": text}])
-    return mock
+def test_task_id_returns_task_plan():
+    """Questions with a task ID produce a FAST_PATH panda_task_status plan."""
+    plan = _build_deterministic_plan("What is task 12345678?", 12345678, None)
+    assert plan is not None
+    assert plan.route == PlanRoute.FAST_PATH
+    assert plan.tool_calls[0].tool == "panda_task_status"
+    assert plan.tool_calls[0].arguments["task_id"] == 12345678
+
+
+def test_job_id_returns_job_plan():
+    """Job ID without analysis keywords produces a panda_job_status plan."""
+    plan = _build_deterministic_plan("What happened to job 9988776?", None, 9988776)
+    assert plan is not None
+    assert plan.route == PlanRoute.FAST_PATH
+    assert plan.tool_calls[0].tool == "panda_job_status"
+
+
+def test_job_id_with_analysis_returns_log_plan():
+    """Job ID with analysis keywords produces a panda_log_analysis plan."""
+    plan = _build_deterministic_plan("Why did job 9988776 fail?", None, 9988776)
+    assert plan is not None
+    assert plan.route == PlanRoute.FAST_PATH
+    assert plan.tool_calls[0].tool == "panda_log_analysis"
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# execute_plan boundary tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
-async def test_general_question_calls_rag_then_llm():
-    """A question with no ID triggers RAG first, then LLM synthesis."""
-    rag_text = (
-        "PanDA Doc Search — top 2 result(s) for: 'What is PanDA?'\n\n"
-        "[1] score=91.0%  distance=0.0900\n  PanDA is the workload manager …\n"
-        "[2] score=85.0%  distance=0.1500\n  PanDA stands for Production …\n"
-    )
-    llm_reply = "PanDA is the Production and Distributed Analysis system used by ATLAS."
-
-    rag_mock = _rag_mock(rag_text)
-    llm_mock = _llm_mock(llm_reply)
-
-    bm25_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA Doc BM25 …"}])
+async def test_general_question_calls_execute_plan():
+    """A question with no ID calls execute_plan with a RETRIEVE plan."""
+    exec_mock = AsyncMock(return_value=_exec_result("PanDA is a workload manager."))
+    guard_mock = AsyncMock(return_value=_mock_guard(allowed=True))
     tool = BambooAnswerTool()
     with (
-        patch.object(ba_mod, "panda_doc_search_tool", AsyncMock(call=rag_mock)),
-        patch.object(ba_mod, "panda_doc_bm25_tool", AsyncMock(call=bm25_mock)),
-        patch.object(ba_mod, "bamboo_llm_answer_tool", AsyncMock(call=llm_mock)),
+        patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
+        patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
     ):
         result = await tool.call({"question": "What is PanDA?"})
-
-    # RAG must have been called with the question.
-    rag_mock.assert_awaited_once()
-    call_args = rag_mock.call_args[0][0]
-    assert call_args["query"] == "What is PanDA?"
-    assert call_args["top_k"] == 20
-
-    # LLM must have been called; its reply is returned verbatim.
-    llm_mock.assert_awaited_once()
-    llm_call_msgs = llm_mock.call_args[0][0]["messages"]
-    # System prompt should reference retrieved excerpts.
-    assert any("retrieved" in m["content"].lower() for m in llm_call_msgs)
-    # User prompt should embed the RAG context.
-    user_msg = next(m for m in llm_call_msgs if m["role"] == "user")
-    assert "PanDA Doc Search" in user_msg["content"]
-
+    exec_mock.assert_awaited_once()
+    plan_arg = exec_mock.call_args[0][0]
+    assert plan_arg.route == PlanRoute.RETRIEVE
     assert result[0]["type"] == "text"
+    assert "PanDA is a workload manager." in result[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_task_id_question_uses_task_plan():
+    """A question with a task ID calls execute_plan with a task_status plan."""
+    exec_mock = AsyncMock(return_value=_exec_result("Task 12345678 is done."))
+    guard_mock = AsyncMock(return_value=_mock_guard(allowed=True))
+    tool = BambooAnswerTool()
+    with (
+        patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
+        patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
+    ):
+        result = await tool.call({"question": "What is the status of task 12345678?"})
+    plan_arg = exec_mock.call_args[0][0]
+    assert plan_arg.tool_calls[0].tool == "panda_task_status"
+    assert plan_arg.tool_calls[0].arguments["task_id"] == 12345678
+    assert result[0]["type"] == "text"
+
+
+@pytest.mark.asyncio
+async def test_job_id_question_uses_job_plan():
+    """A question with a job ID calls execute_plan with a job_status plan."""
+    exec_mock = AsyncMock(return_value=_exec_result("Job 6837798305 failed."))
+    guard_mock = AsyncMock(return_value=_mock_guard(allowed=True))
+    tool = BambooAnswerTool()
+    with (
+        patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
+        patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
+    ):
+        result = await tool.call({"question": "What happened to job 6837798305?"})
+    plan_arg = exec_mock.call_args[0][0]
+    assert plan_arg.tool_calls[0].tool == "panda_job_status"
+    assert plan_arg.tool_calls[0].arguments["job_id"] == 6837798305
+    assert result[0]["type"] == "text"
+
+
+@pytest.mark.asyncio
+async def test_off_topic_question_blocked_before_execute():
+    """An off-topic question is rejected by the guard; execute_plan never called."""
+    exec_mock = AsyncMock(return_value=_exec_result("should not reach"))
+    guard_mock = AsyncMock(return_value=_mock_guard(allowed=False))
+    tool = BambooAnswerTool()
+    with (
+        patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
+        patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
+    ):
+        result = await tool.call({"question": "What is the stock price of CERN?"})
+    exec_mock.assert_not_called()
+    assert result[0]["type"] == "text"
+    assert "Off-topic" in result[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_bypass_routing_skips_guard_and_execute():
+    """bypass_routing=True skips topic guard and execute_plan; goes direct to LLM."""
+    llm_reply = "Direct LLM answer."
+    llm_mock = AsyncMock(return_value=[{"type": "text", "text": llm_reply}])
+    guard_mock = AsyncMock(return_value=_mock_guard(allowed=True))
+    exec_mock = AsyncMock(return_value=_exec_result("should not reach"))
+    tool = BambooAnswerTool()
+    with (
+        patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
+        patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
+        patch("bamboo.tools.bamboo_answer.bamboo_llm_answer_tool") as mock_llm,
+    ):
+        mock_llm.call = llm_mock
+        result = await tool.call({"question": "hello", "bypass_routing": True})
+    guard_mock.assert_not_awaited()
+    exec_mock.assert_not_called()
+    llm_mock.assert_awaited_once()
     assert llm_reply in result[0]["text"]
 
 
 @pytest.mark.asyncio
-async def test_general_question_rag_unavailable_falls_back_gracefully():
-    """When RAG returns an error message, the LLM is still called with a no-context prompt."""
-    rag_text = "ChromaDB is not installed.  Install it with: pip install -r requirements-rag.txt"
-    llm_reply = "Based on general knowledge: PanDA manages ATLAS workloads."
-
-    rag_mock = _rag_mock(rag_text)
-    llm_mock = _llm_mock(llm_reply)
-
-    bm25_mock = AsyncMock(return_value=[{"type": "text", "text": "ChromaDB is not installed."}])
+async def test_history_threaded_into_execute_plan():
+    """Prior conversation turns are forwarded to execute_plan as the history arg."""
+    exec_mock = AsyncMock(return_value=_exec_result("follow-up answer"))
+    guard_mock = AsyncMock(return_value=_mock_guard(allowed=True))
+    messages = [
+        {"role": "user", "content": "What is PanDA?"},
+        {"role": "assistant", "content": "PanDA is a workload manager."},
+        {"role": "user", "content": "How do I submit a job?"},
+    ]
     tool = BambooAnswerTool()
     with (
-        patch.object(ba_mod, "panda_doc_search_tool", AsyncMock(call=rag_mock)),
-        patch.object(ba_mod, "panda_doc_bm25_tool", AsyncMock(call=bm25_mock)),
-        patch.object(ba_mod, "bamboo_llm_answer_tool", AsyncMock(call=llm_mock)),
+        patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
+        patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
     ):
-        result = await tool.call({"question": "What is PanDA?"})
-
-    rag_mock.assert_awaited_once()
-    llm_mock.assert_awaited_once()
-
-    # System prompt should NOT say "retrieved excerpts" — it's the no-context variant.
-    llm_call_msgs = llm_mock.call_args[0][0]["messages"]
-    system_msg = next(m for m in llm_call_msgs if m["role"] == "system")
-    assert "did not contain" in system_msg["content"].lower() or "not contain" in system_msg["content"].lower()
-
-    assert result[0]["type"] == "text"
-    assert llm_reply in result[0]["text"]
-
-
-@pytest.mark.asyncio
-async def test_general_question_rag_exception_falls_back_gracefully():
-    """If the RAG tool raises, the LLM is still called — RAG failure is non-fatal."""
-    llm_reply = "PanDA is the workload manager for ATLAS."
-
-    rag_mock = AsyncMock(side_effect=RuntimeError("unexpected chroma error"))
-    llm_mock = _llm_mock(llm_reply)
-
-    tool = BambooAnswerTool()
-    with (
-        patch.object(ba_mod, "panda_doc_search_tool", AsyncMock(call=rag_mock)),
-        patch.object(ba_mod, "bamboo_llm_answer_tool", AsyncMock(call=llm_mock)),
-    ):
-        result = await tool.call({"question": "What is PanDA?"})
-
-    llm_mock.assert_awaited_once()
-    assert result[0]["type"] == "text"
-    assert llm_reply in result[0]["text"]
-
-
-@pytest.mark.asyncio
-async def test_task_id_question_does_not_call_rag():
-    """Questions containing a task ID must NOT trigger the RAG tool."""
-    task_tool_mock = AsyncMock(return_value={"evidence": {"payload": {"status": "done"}}})
-    llm_mock = _llm_mock("Task 12345678 finished.")
-    rag_mock = _rag_mock("should not be called")
-
-    tool = BambooAnswerTool()
-    with (
-        patch.object(ba_mod, "panda_doc_search_tool", AsyncMock(call=rag_mock)),
-        patch.object(ba_mod, "panda_task_status_tool", AsyncMock(call=task_tool_mock)),
-        patch.object(ba_mod, "bamboo_llm_answer_tool", AsyncMock(call=llm_mock)),
-    ):
-        await tool.call({"question": "What is the status of task 12345678?"})
-
-    rag_mock.assert_not_awaited()
-    task_tool_mock.assert_awaited_once()
+        await tool.call({"messages": messages})
+    exec_mock.assert_awaited_once()
+    # execute_plan(plan, question, history) — history is positional arg 2
+    _, question_arg, history_arg = exec_mock.call_args[0]
+    assert question_arg == "How do I submit a job?"
+    assert any(m.get("role") == "assistant" for m in history_arg)

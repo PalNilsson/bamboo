@@ -187,6 +187,19 @@ def build_planner_system_prompt(schema: dict[str, Any]) -> str:
         "- Do not include any explanation outside the JSON object.\n"
         "- Only propose tools that appear in the provided tool catalog.\n"
         "- Be conservative: if uncertain, set route='PLAN' and confidence lower.\n\n"
+        "Routing guidance:\n"
+        "- If the question contains a task ID (hints.task_id present): "
+        "use panda_task_status. route=FAST_PATH.\n"
+        "- If the question asks to diagnose/analyse/why a job failed "
+        "(hints.job_id present + failure keywords): "
+        "use panda_log_analysis. route=FAST_PATH.\n"
+        "- If the question asks about a job (hints.job_id present, no failure keywords): "
+        "use panda_job_status. route=FAST_PATH.\n"
+        "- If the question asks about a site or queue: "
+        "use panda_queue_info or panda_pilot_status. route=FAST_PATH.\n"
+        "- For ALL other questions (general knowledge, concepts, how-to, 'what is'): "
+        "use panda_doc_search AND panda_doc_bm25 together. route=RETRIEVE. "
+        "Never answer general questions from the LLM alone — always retrieve first.\n\n"
         f"JSON Schema (must match exactly):\n{schema_compact}\n"
     )
 
@@ -275,11 +288,21 @@ def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str,
             seen.add(entry["name"])
             out.append(entry)
 
-    # 1) Statically-registered core tools — always included.
+    # Internal/infrastructure tools that the planner must never propose —
+    # they are synthesis helpers, not evidence sources.
+    _INTERNAL_TOOLS: frozenset[str] = frozenset({
+        "bamboo_llm_answer",
+        "bamboo_answer",
+        "bamboo_plan",
+        "bamboo_health",
+    })
+
+    # 1) Statically-registered core tools — always included, except internals.
     try:
         from bamboo.core import TOOLS  # pylint: disable=import-outside-toplevel
         for tool_name, tool_obj in TOOLS.items():
-            _add(tool_obj, fallback_name=tool_name)
+            if tool_name not in _INTERNAL_TOOLS:
+                _add(tool_obj, fallback_name=tool_name)
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
@@ -319,8 +342,8 @@ class BambooPlannerTool:
                 "Decompose a complex question into a structured plan of tool calls. "
                 "Use when a question requires multiple steps, combines task and "
                 "job lookups, or when intent is ambiguous and deterministic routing "
-                "is insufficient. Returns a validated JSON plan — not a final answer. "
-                "The caller is responsible for executing the plan's tool_calls."
+                "is insufficient. Returns a validated JSON plan by default, or a "
+                "synthesised natural-language answer when execute=true."
             ),
             "inputSchema": {
                 "type": "object",
@@ -337,6 +360,30 @@ class BambooPlannerTool:
                     },
                     "temperature": {"type": "number", "default": 0.0, "description": "Planner temperature (keep low)."},
                     "max_tokens": {"type": "integer", "default": 900, "description": "Max completion tokens."},
+                    "execute": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "If true, execute the plan and return a synthesised answer. "
+                            "If false (default), return the raw JSON plan for inspection."
+                        ),
+                    },
+                    "messages": {
+                        "type": "array",
+                        "description": (
+                            "Optional full chat history as a list of {role, content} dicts. "
+                            "Used to thread conversation context into the synthesised answer "
+                            "when execute=true."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                            "required": ["role", "content"],
+                        },
+                    },
                 },
                 "required": ["question"],
                 "additionalProperties": False,
@@ -344,17 +391,26 @@ class BambooPlannerTool:
         }
 
     async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:
-        """Execute the planner call and return the validated plan as JSON text.
+        """Execute the planner call.
+
+        When ``execute`` is ``False`` (the default) the validated plan is
+        returned as a JSON text block.  When ``execute`` is ``True`` the plan
+        is immediately executed by
+        :func:`~bamboo.tools.bamboo_executor.execute_plan` and a synthesised
+        natural-language answer is returned instead.
 
         Args:
-            arguments: Tool arguments.
+            arguments: Tool arguments.  Must contain ``question``.  Optional
+                keys: ``hints``, ``namespaces``, ``temperature``,
+                ``max_tokens``, ``execute``, ``messages``.
 
         Returns:
-            List[Dict[str, Any]]: Single text content block containing the JSON plan.
+            List[MCPContent]: Single text content block — either a JSON plan
+            (``execute=False``) or a synthesised answer (``execute=True``).
 
         Raises:
-            ValueError: If the question is missing or the model output cannot be validated.
-            RuntimeError: If the LLM runtime is not initialized.
+            ValueError: If the question is missing.
+            RuntimeError: If the LLM runtime is not initialised.
         """
         question = str(arguments.get("question", "") or "").strip()
         if not question:
@@ -371,7 +427,7 @@ class BambooPlannerTool:
 
         system = build_planner_system_prompt(schema)
         user = build_planner_user_prompt(question=question, tool_catalog=tool_catalog, hints=hints_dict)
-        messages: list[Message] = [
+        planner_messages: list[Message] = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
@@ -379,13 +435,14 @@ class BambooPlannerTool:
         temperature = float(arguments.get("temperature", 0.0))
         max_tokens = int(arguments.get("max_tokens", 900))
 
-        text = await _call_default_llm(messages, temperature=temperature, max_tokens=max_tokens)
+        text = await _call_default_llm(planner_messages, temperature=temperature, max_tokens=max_tokens)
 
         # Validate, with one optional repair attempt.
+        plan: Plan
         try:
             plan = Plan.model_validate_json(extract_first_json_object(text))
         except Exception as e:  # pylint: disable=broad-exception-caught
-            repair_messages = messages + [
+            repair_messages = planner_messages + [
                 {
                     "role": "user",
                     "content": (
@@ -409,9 +466,26 @@ class BambooPlannerTool:
                     "raw_output": text2[:500],
                 }))
 
-        # Pydantic's JSON helpers intentionally limit json.dumps kwargs.
-        # Use model_dump() + json.dumps to keep Unicode readable.
-        return text_content(json.dumps(plan.model_dump(), indent=2, ensure_ascii=False))
+        # When execute=False (default), return the raw JSON plan for inspection.
+        execute = bool(arguments.get("execute", False))
+        if not execute:
+            # Pydantic's JSON helpers intentionally limit json.dumps kwargs.
+            # Use model_dump() + json.dumps to keep Unicode readable.
+            return text_content(json.dumps(plan.model_dump(), indent=2, ensure_ascii=False))
+
+        # When execute=True, run the plan and return a synthesised answer.
+        # Extract conversation history from the optional ``messages`` argument
+        # so the LLM synthesis step has context for follow-up questions.
+        # Imports are deferred to avoid a circular-import cycle at module load.
+        from bamboo.tools.base import coerce_messages  # pylint: disable=import-outside-toplevel
+        from bamboo.tools.bamboo_answer import _extract_history  # pylint: disable=import-outside-toplevel
+        from bamboo.tools.bamboo_executor import execute_plan  # pylint: disable=import-outside-toplevel
+
+        messages_raw: list[Any] = arguments.get("messages") or []
+        chat_messages = coerce_messages(messages_raw) if messages_raw else []
+        history = _extract_history(chat_messages, question) if chat_messages else []
+
+        return await execute_plan(plan, question, history)
 
 
 async def _call_default_llm(messages: list[Message], temperature: float, max_tokens: int) -> str:

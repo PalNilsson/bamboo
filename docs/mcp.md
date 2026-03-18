@@ -12,66 +12,96 @@ calls over JSON-RPC 2.0.  Two transports are supported:
 
 ## How LLMs are used
 
-Bamboo uses LLMs for three distinct purposes.  Understanding which role each
-LLM plays — and which role it deliberately does *not* play — is key to
-understanding the architecture.
+Bamboo's own UIs (TUI and Streamlit) call `bamboo_answer` directly by name.
+`bamboo_answer` is a server-side orchestrator: it decides which evidence tools
+to call, calls them, and then uses an LLM to turn the results into a
+natural-language answer.
 
-### The standard MCP loop (not how Bamboo's own UIs work)
+There are three places in this pipeline where an LLM may be invoked.  Each is
+optional — the common case requires only the third.
+
+### 1. Topic guard (optional, fast model)
+
+Before any tool call, a two-stage guard checks whether the question is
+on-topic for PanDA/ATLAS.
+
+- **Stage 1 — keyword check** (free, synchronous): the question is matched
+  against allow and deny term lists.  Most domain questions are allowed
+  immediately by a keyword hit (`reason=keyword_allow`).
+- **Stage 2 — LLM classifier** (fast model, ~5 output tokens): fires only
+  when Stage 1 cannot reach a verdict — e.g. a short or ambiguous question
+  with no domain keywords.  The model replies with a single word, `ALLOW` or
+  `DENY`.
+
+Two additional cases bypass the guard entirely:
+
+- **Content-free follow-ups** ("Tell me more", "Elaborate") — trivially
+  on-topic when prior history exists; recorded as `reason=followup_allow`.
+- **Keyword allow** — as above, no LLM needed.
+
+If the LLM classifier fails for any reason, the guard fails open (the
+question is allowed through) to avoid blocking legitimate users.
+
+### 2. Tool selection (optional, default model)
+
+`bamboo_answer` decides which evidence tool(s) to call using one of two
+mechanisms, tried in order:
+
+**Deterministic routing** — `_build_deterministic_plan()` inspects the
+question for a task ID, a job ID, or failure-analysis keywords using regex
+patterns.  This produces a `Plan` object covering four cases:
+
+| Question contains | Tool called | Route |
+|---|---|---|
+| job ID + failure keywords (analyse, why, fail, log…) | `panda_log_analysis` | `FAST_PATH` |
+| job ID (no task ID) | `panda_job_status` | `FAST_PATH` |
+| task ID | `panda_task_status` | `FAST_PATH` |
+| neither | `panda_doc_search` + `panda_doc_bm25` | `RETRIEVE` |
+
+**No LLM is involved here.** This covers the overwhelming majority of
+questions with zero routing cost.
+
+**LLM planner fallback** — if the deterministic step cannot produce a plan
+(currently reserved for future multi-step questions), `bamboo_plan` is called.
+This uses the default LLM to select tools from a curated catalog (internal
+infrastructure tools are excluded) guided by explicit routing rules in the
+system prompt.  In practice this path is not triggered by normal usage today.
+
+### 3. Answer synthesis (always, default model)
+
+After the evidence tool(s) have run, the LLM synthesises a natural-language
+answer.  It receives:
+
+- A route-specific system prompt (different rules for RAG documentation
+  questions, task status, job status, and log analysis)
+- Prior conversation history, with long assistant messages truncated to
+  400 characters to prevent prompt growth across multi-turn conversations
+- A synthesised user message containing the question and the tool evidence
+
+For content-free follow-ups ("Tell me more"), the user message uses
+**expansion framing** — the LLM is told to go deeper than the prior answer
+with a 200-300 word target, and `max_tokens` is capped at 600 to keep
+response time predictable.  For all other questions `max_tokens` is 2048.
+
+The LLM's role here is purely presentational: it summarises and explains
+evidence but does not select tools, invent facts, or call further tools.
+
+---
+
+### Comparison with standard MCP tool selection
 
 In standard MCP usage a *host LLM* (e.g. Claude Desktop, Cursor) calls
-`tools/list`, receives the tool catalog (`name`, `description`,
-`inputSchema`), and uses that information to decide which tool to call and
-with what arguments.  **Bamboo's server fully supports this pattern** — the
-catalog is published, schemas are strict, and an external MCP host can drive
-tool selection entirely.
+`tools/list` and uses the tool descriptions to decide which tool to call.
+**Bamboo's server fully supports this** — the catalog is published and an
+external host can drive everything.
 
-However, **Bamboo's own UIs (TUI and Streamlit) do not use this pattern.**
-They call `bamboo_answer` directly by name, bypassing external LLM-based tool
-selection.  `bamboo_answer` is a server-side orchestrator that selects and
-calls the individual tools internally using deterministic routing.
+Bamboo's own UIs differ in two ways: tool selection happens server-side (not
+in the client), and the common case uses deterministic regex routing rather
+than an LLM at all.  When the LLM planner is invoked as a fallback, it is
+constrained by routing rules rather than left to reason freely from tool
+descriptions alone.
 
-### The three LLM roles inside bamboo_answer
 
-When `bamboo_answer` handles a request, LLMs are used for:
-
-| Role | When | LLM profile | Source |
-|---|---|---|---|
-| **Topic classification** | Only when keyword matching is ambiguous | fast | `bamboo.tools.topic_guard` |
-| **Answer synthesis** | Always, after every tool call | default | `bamboo_answer._call_llm()` |
-| **Plan generation** | Only when `bamboo_plan` is called explicitly | default | `bamboo.tools.planner` |
-
-In none of these roles does the LLM *select tools* — that decision is made
-deterministically by `_route()` from the question text.
-
-### Topic classification
-
-A two-stage guard runs before any tool or LLM call.  Stage 1 is a fast
-keyword allow/deny check.  Stage 2 — the LLM classifier — fires only when
-keywords cannot reach a confident verdict (e.g. a follow-up question like
-"why?").  If the LLM itself fails, the guard fails open (allows the question
-through) to avoid blocking legitimate requests.
-
-### Answer synthesis
-
-This is the primary LLM use and runs on every request that passes the topic
-guard.  After the appropriate tool has been called and returned structured
-evidence, the LLM receives:
-
-- A route-specific system prompt (different rules for RAG, task, job, and log
-  analysis routes)
-- Prior conversation history (raw question/answer pairs from `messages`)
-- A synthesised user message containing the original question plus the tool
-  evidence
-
-The LLM's job is purely presentational: it summarises and explains evidence
-but does not select tools, invent facts, or call further tools.
-
-### Plan generation
-
-`bamboo_plan` is an optional standalone tool for clients that need LLM-backed
-multi-step planning.  It is not called by `bamboo_answer` — it is a separate
-MCP entry point.  See the [bamboo_plan](#bamboo_plan-llm-backed-planner)
-section below.
 
 ---
 
@@ -107,8 +137,8 @@ return text_content(json.dumps({"evidence": {...}, "text": "Summary..."}))
 ```
 
 Callers that need the raw evidence parse it back with
-`json.loads(result[0]["text"])`.  The `bamboo_answer` tool does this
-automatically via `_unpack_tool_result()`.
+`json.loads(result[0]["text"])`.  The executor does this automatically via
+`unpack_tool_result()` in `bamboo.tools.bamboo_executor`.
 
 **Tools must never raise.** All error conditions are returned as
 `text_content(error_message)` so the MCP client always receives a well-formed
@@ -142,21 +172,15 @@ serves both:
 
 2. **Server-driven (`bamboo_answer`)**: Bamboo's own UIs call `bamboo_answer`
    directly.  `bamboo_answer` selects and calls the individual tools itself
-   using deterministic regex routing — no external LLM is involved in tool
-   selection.  The `bamboo_plan` tool is available as a separate entry point
-   for clients that want LLM-backed planning when deterministic routing is
-   insufficient.
+   using the routing pipeline described below.
 
 > **Note on tool descriptions**: because the tool catalog is exposed to
 > external LLM clients, the `description` field of each tool definition is
 > part of the public contract.  Descriptions should be written from the
 > perspective of an LLM deciding whether to call a tool, not from an
-> implementer's perspective.  For example, `panda_task_status` says "return
-> structured evidence for LLM summarisation" — useful to a developer, but
-> not helpful to an LLM choosing between `panda_task_status` and
-> `panda_job_status`.  Improving description quality is an open task.
+> implementer's perspective.
 
-### bamboo_answer routing (server-driven)
+### bamboo_answer routing pipeline
 
 `bamboo_answer` is the primary entry point for both UIs.  It accepts
 `question` (string), `messages` (full chat history for multi-turn context),
@@ -168,65 +192,109 @@ The `inputSchema` is checked against the supplied arguments.
 
 **Step 2 — History extraction**
 
-Prior user/assistant turns are extracted from `messages`, stripping system
-messages and the current question so they can be injected into later LLM calls.
+Prior user/assistant turns are extracted from `messages` via
+`_extract_history()`, stripping system messages and the current question so
+they can be injected into later LLM calls.
 
-**Step 3 — Topic guard** (`bamboo.tools.topic_guard`)
+**Step 3 — Follow-up detection and RAG query reformulation**
 
-A two-stage guard runs before any tool or LLM call.  See
-[Topic classification](#topic-classification) above for detail.  If the
-question is rejected, a polite rejection message is returned immediately and
-no downstream calls are made.
+`_is_content_free_followup()` checks whether the question is a content-free
+phrase ("Tell me more", "Elaborate", "Go on", etc.).  When it matches and
+history is present:
 
-**Step 4 — Deterministic routing** (inside `bamboo_answer._route()`)
+- The topic guard (Step 4) is bypassed entirely, recorded as
+  `reason=followup_allow` in the trace.
+- The RAG query (`rag_query`) is substituted with the last meaningful user
+  question from history via `_last_user_question()` so retrieval targets the
+  actual topic rather than the follow-up phrase.
+- `original_question` is set to the user's literal phrasing and passed
+  through to the synthesis step, which uses expansion framing.
 
-Regex patterns extract `task_id` and `job_id` from the question text.
-The combination of IDs and keywords determines the route:
+**Step 4 — Topic guard** (`bamboo.tools.topic_guard`)
 
-| Condition | Route | Tool called |
+Skipped for content-free follow-ups (Step 3).  Otherwise, a two-stage guard
+checks the question: keyword allow/deny first, then LLM classifier for
+ambiguous cases.  If the question is rejected, a polite message is returned
+immediately and no downstream calls are made.
+
+**Step 5 — Deterministic routing** (`_build_deterministic_plan()`)
+
+Regex patterns extract `task_id` and `job_id` from `rag_query`.  The
+combination of IDs and keywords builds a `Plan` object with no LLM call:
+
+| Condition | Route | Tool(s) called |
 |---|---|---|
-| job_id + analysis keywords | log analysis | `panda_log_analysis` |
-| job_id only | job status | `panda_job_status` |
-| task_id | task status | `panda_task_status` |
-| no ID | RAG (vector + BM25, concurrent) | `panda_doc_search` + `panda_doc_bm25` |
+| job_id + analysis keywords | `FAST_PATH` | `panda_log_analysis` |
+| job_id only (no task_id) | `FAST_PATH` | `panda_job_status` |
+| task_id | `FAST_PATH` | `panda_task_status` |
+| no ID | `RETRIEVE` | `panda_doc_search` (top_k=5) + `panda_doc_bm25` (top_k=5) |
 
-There is no LLM involvement in this step — routing is fully deterministic
-from the question text.
+This covers all common questions with **zero LLM cost**.
 
-**Step 5 — LLM synthesis** (`bamboo_llm_answer` / `_call_llm`)
+**Step 6 — LLM planner fallback** (`bamboo_plan`)
 
-See [Answer synthesis](#answer-synthesis) above.
+Reserved for questions where `_build_deterministic_plan()` returns `None`.
+Currently unreachable in normal usage but available for future multi-step or
+ambiguous question patterns.  The planner receives a tool catalog that excludes
+internal infrastructure tools (`bamboo_llm_answer`, `bamboo_answer`,
+`bamboo_plan`, `bamboo_health`) and routing guidance in its system prompt.
+
+**Step 7 — Plan execution** (`bamboo.tools.bamboo_executor.execute_plan()`)
+
+The executor iterates the plan's `tool_calls` in order.  For each call it:
+
+1. Resolves the tool from `TOOLS` or plugin entry points.
+2. Validates arguments against the tool's `inputSchema`.
+3. Calls `await tool.call(args)` and unpacks JSON evidence.
+4. Accumulates evidence strings for the synthesis step.
+
+Unknown tools, validation failures, and tool exceptions are handled
+gracefully — partial evidence from successful calls is still synthesised.
+Only when all calls fail is a top-level error returned.
+
+An `EVENT_PLAN` trace span is emitted at the start of execution containing
+the full plan JSON, which the TUI's `/plan` command reads.
+
+**Step 8 — LLM synthesis** (`bamboo.tools.bamboo_executor.call_llm()`)
+
+See [Answer synthesis](#answer-synthesis) above.  The synthesis prompt is
+selected by `_pick_synthesis_prompt()` based on which tools ran:
+
+| Tools called | System prompt used |
+|---|---|
+| `panda_log_analysis` | Log-analysis diagnostic prompt |
+| `panda_job_status` | Job-status summary prompt |
+| `panda_task_status` | Task-metadata summary prompt |
+| `panda_doc_search` or `panda_doc_bm25` | RAG documentation prompt |
+| other / mixed | Generic multi-tool prompt |
+
+When `original_question` is set (content-free follow-up), the user message
+uses expansion framing with a 200-300 word target and `max_tokens=600`.
 
 ### bamboo_plan (LLM-backed planner)
 
-`bamboo_plan` is a standalone MCP tool that an orchestrating client can call
-when deterministic routing is insufficient.  It accepts a question, optional
-hints, and an optional namespace list, and returns a validated JSON plan.
+`bamboo_plan` is a standalone MCP tool that can be called directly by
+external clients or used internally by `bamboo_answer` as a routing fallback.
 
-The planner uses two messages:
+When called with `execute=False` (default) it returns a validated JSON plan.
+When called with `execute=True` it executes the plan via `execute_plan()` and
+returns a synthesised answer directly.
 
-**System prompt:**
+The planner system prompt includes routing guidance:
 
-- You are a tool planner for an MCP server.
-- Output MUST be a single JSON object matching the plan schema.
-- Do not wrap output in Markdown.
-- Only propose tools present in the provided tool catalog.
+- task ID present → `panda_task_status`
+- job ID + failure keywords → `panda_log_analysis`
+- job ID alone → `panda_job_status`
+- all other questions → `panda_doc_search` + `panda_doc_bm25` (always
+  retrieve first; never answer general knowledge questions from parametric
+  memory alone)
 
-**User message:**
+Infrastructure tools are excluded from the catalog to prevent the planner
+from routing general questions to the raw LLM passthrough.
 
-```json
-{
-  "question": "...",
-  "hints": {"task_id": 123456},
-  "tools": [
-    {"name": "panda_task_status", "description": "...", "inputSchema": {}}
-  ]
-}
-```
-
-The planner extracts the first JSON object from the model output, validates it
-against the `Plan` Pydantic model, and performs at most one repair attempt.
-If both attempts fail, a structured error is returned (not raised).
+The planner validates output against the `Plan` Pydantic model and performs
+at most one repair attempt.  If both attempts fail, a structured error is
+returned (not raised).
 
 The authoritative plan schema:
 
@@ -240,9 +308,13 @@ schema = get_plan_json_schema()
 Both UIs maintain an in-memory conversation history (capped at
 `BAMBOO_HISTORY_TURNS` user+assistant pairs, default 10).  On each question
 the full history is sent as `messages` to `bamboo_answer`.  The server
-extracts prior turns and injects them between the system prompt and the
-synthesised user message.  The server is stateless — history lives in the
-client.
+extracts prior turns and injects them into the synthesis LLM call.  The
+server is stateless — history lives in the client.
+
+To prevent synthesis prompts from growing unbounded across long conversations,
+long assistant messages in the injected history are truncated at
+`_HISTORY_ASSISTANT_MAX_CHARS` characters (default 400).  This keeps a
+sufficient excerpt for follow-up resolution without bloating the prompt.
 
 ## Sequence diagram
 

@@ -155,6 +155,7 @@ Extra fields:
 |---|---|
 | `keyword_allow` | Matched an allow-list term; no LLM cost. |
 | `keyword_deny` | Matched a deny-list term; no LLM cost. |
+| `followup_allow` | Content-free follow-up ("Tell me more") with prior history; guard bypassed entirely. |
 | `llm_allow` | Ambiguous question permitted by the LLM classifier. |
 | `llm_deny` | Ambiguous question rejected by the LLM classifier. |
 | `llm_error_allow` | LLM classifier failed; question allowed (fail-open). |
@@ -192,6 +193,43 @@ Example:
 
 ---
 
+### `plan`
+
+Emitted by `bamboo_executor.execute_plan()` at the start of plan execution.
+Contains the full validated `Plan` object so the TUI's `/plan` command can
+display routing decisions without a separate API call.
+
+Extra fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `plan` | object | The full serialised `Plan` (route, confidence, tool_calls, explain). |
+
+`plan.route` values:
+
+| Value | Meaning |
+|---|---|
+| `FAST_PATH` | Single high-confidence tool call (task, job, or log analysis). |
+| `RETRIEVE` | RAG retrieval — `panda_doc_search` + `panda_doc_bm25`. |
+| `PLAN` | Multi-step plan produced by the LLM planner. |
+
+Example (deterministic RETRIEVE route):
+```json
+{
+  "event": "plan", "tool": "bamboo_executor", "duration_ms": 0.1,
+  "plan": {
+    "route": "RETRIEVE", "confidence": 1.0,
+    "tool_calls": [
+      {"tool": "panda_doc_search", "arguments": {"query": "What is PanDA?", "top_k": 5}},
+      {"tool": "panda_doc_bm25",   "arguments": {"query": "What is PanDA?", "top_k": 5}}
+    ],
+    "explain": "Deterministic: no task/job ID → RAG retrieval."
+  }
+}
+```
+
+---
+
 ### `llm_call`
 
 A single `client.generate()` call inside `llm_passthrough`. Token counts are
@@ -220,30 +258,30 @@ Example:
 
 ### `synthesis`
 
-The LLM synthesis step inside `bamboo_answer`, wrapping an `llm_call`.
-Identifies which routing branch was taken.
+The LLM synthesis step inside `bamboo_executor`, wrapping an `llm_call`.
+Identifies which routing branch was taken and which tools contributed evidence.
 
 Extra fields:
 
 | Field | Type | Description |
 |---|---|---|
-| `route` | string | Routing branch (see below). |
+| `route` | string | Plan route value (see below). |
+| `tools` | list[str] | Names of tools whose evidence was used in synthesis. |
 
 `route` values:
 
 | Value | Triggered by |
 |---|---|
-| `rag` | General knowledge question (no task/job ID found). |
-| `task` | Task ID extracted from the question. |
-| `job` | Job ID extracted, no analysis keywords. |
-| `log_analysis` | Job ID extracted with failure/analysis keywords. |
-| `bypass` | `bypass_routing=true` flag set by the caller. |
+| `RETRIEVE` | General knowledge question — RAG retrieval route. |
+| `FAST_PATH` | Task ID, job ID, or log-analysis question. |
+| `PLAN` | Multi-step plan from the LLM planner. |
 
 Example:
 ```json
 {
-  "event": "synthesis", "tool": "bamboo_answer",
-  "duration_ms": 681.4, "route": "rag"
+  "event": "synthesis", "tool": "bamboo_executor",
+  "duration_ms": 681.4, "route": "RETRIEVE",
+  "tools": ["panda_doc_search", "panda_doc_bm25"]
 }
 ```
 
@@ -255,25 +293,37 @@ A typical general knowledge question (RAG route) produces these spans in
 order:
 
 ```
-tool_call   bamboo_answer        823 ms   args=['question']
-  guard       topic_guard          0 ms   allowed=True reason=keyword_allow
-  retrieval   panda_doc_search    45 ms   backend=vector hits=38
-  retrieval   panda_doc_bm25      12 ms   backend=bm25 hits=19
-  llm_call    bamboo_llm_answer  680 ms   openai/gpt-4.1-mini tokens=3412→290
-  synthesis   bamboo_answer      681 ms   route=rag
+tool_call   bamboo_answer        5800 ms   args=['question', 'messages']
+  guard       topic_guard           0 ms   allowed=True reason=keyword_allow
+  plan        bamboo_executor       0 ms   route=RETRIEVE confidence=1.0
+  llm_call    bamboo_llm_answer  4600 ms   mistral/mistral-large-latest tokens=1749→220
+  synthesis   bamboo_executor    4600 ms   route=RETRIEVE tools=[panda_doc_search, panda_doc_bm25]
+```
+
+A content-free follow-up ("Tell me more") reuses the prior question as the
+RAG query, bypasses the guard, and uses expansion framing:
+
+```
+tool_call   bamboo_answer       11000 ms   args=['question', 'messages']
+  guard       topic_guard           0 ms   allowed=True reason=followup_allow
+  plan        bamboo_executor       0 ms   route=RETRIEVE confidence=1.0 (query=prior question)
+  llm_call    bamboo_llm_answer  9700 ms   mistral/mistral-large-latest tokens=1917→591
+  synthesis   bamboo_executor    9700 ms   route=RETRIEVE tools=[panda_doc_search, panda_doc_bm25]
+```
+
+A task status question (no retrieval, deterministic FAST_PATH) looks like:
+
+```
+tool_call   bamboo_answer        5500 ms   args=['question', 'messages']
+  guard       topic_guard           0 ms   allowed=True reason=keyword_allow
+  plan        bamboo_executor       0 ms   route=FAST_PATH confidence=1.0
+  llm_call    bamboo_llm_answer  4900 ms   mistral/mistral-large-latest tokens=2100→180
+  synthesis   bamboo_executor    4900 ms   route=FAST_PATH tools=[panda_task_status]
 ```
 
 Note that `synthesis` and `llm_call` overlap: `synthesis` is the outer span
-and includes `llm_call` inside it.
-
-A task status question (no retrieval) looks like this:
-
-```
-tool_call   bamboo_answer        540 ms   args=['question']
-  guard       topic_guard          0 ms   allowed=True reason=keyword_allow
-  synthesis   bamboo_answer      530 ms   route=task
-    llm_call  bamboo_llm_answer  528 ms   openai/gpt-4.1-mini tokens=2100→180
-```
+and includes `llm_call` inside it.  The `plan` span is near-zero because
+deterministic routing requires no LLM call.
 
 ---
 

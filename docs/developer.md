@@ -88,7 +88,7 @@ pytest tests/test_task_status.py
 pytest tests/test_task_status.py::test_task_status_success_json
 ```
 
-All 168 tests run fully offline — no API keys, no network, no ChromaDB
+All 324 tests run fully offline — no API keys, no network, no ChromaDB
 instance required.
 
 ---
@@ -97,26 +97,30 @@ instance required.
 
 ```
 tests/
-├── conftest.py                  # sys.path setup for non-installed runs
+├── conftest.py                      # sys.path setup for non-installed runs
 │
-├── test_task_status.py          # panda_task_status — BigPanDA HTTP tool
-├── test_job_status.py           # panda_job_status
-├── test_log_analysis.py         # panda_log_analysis — failure classification
-├── test_doc_rag.py              # panda_doc_search — ChromaDB vector search
-├── test_doc_bm25.py             # panda_doc_bm25 — BM25 keyword search
-├── test_topic_guard.py          # two-stage topic guard
-├── test_bamboo_answer_rag.py    # bamboo_answer — RAG routing branch
-├── test_llm_error_handling.py   # friendly LLM error messages, all routes
-├── test_planner.py              # bamboo_plan — LLM planner tool
+├── test_task_status.py              # panda_task_status — BigPanDA HTTP tool
+├── test_job_status.py               # panda_job_status
+├── test_log_analysis.py             # panda_log_analysis — failure classification
+├── test_doc_rag.py                  # panda_doc_search — ChromaDB vector search
+├── test_doc_bm25.py                 # panda_doc_bm25 — BM25 keyword search
+├── test_topic_guard.py              # two-stage topic guard
+├── test_bamboo_answer_helpers.py    # helper functions (_extract_task_id, _compact_json, etc.)
+├── test_bamboo_answer_rag.py        # bamboo_answer — routing, follow-up detection, guard bypass
+├── test_bamboo_executor.py          # execute_plan — tool resolution, evidence merging, synthesis
+├── test_llm_error_handling.py       # friendly LLM error messages, all routes
+├── test_planner.py                  # bamboo_plan — LLM planner tool
+├── test_context_memory.py           # multi-turn history threading across all routes
+├── test_narrow_waist.py             # list[MCPContent] contract enforced by all tools
 │
-├── test_llm_providers.py        # OpenAI / Anthropic / Gemini / compat clients
+├── test_llm_providers.py            # OpenAI / Anthropic / Gemini / compat clients
 │
-├── test_tracing.py              # bamboo.tracing — NDJSON spans, file output
-├── test_tracing_otel.py         # bamboo.tracing — OpenTelemetry integration
+├── test_tracing.py                  # bamboo.tracing — NDJSON spans, file output
+├── test_tracing_otel.py             # bamboo.tracing — OpenTelemetry integration
 │
-├── test_panda_http_sync.py      # _panda_http / _fallback_http parity
-├── test_loader.py               # plugin entry-point loader
-└── test_cli.py                  # bamboo CLI
+├── test_panda_http_sync.py          # _panda_http / _fallback_http parity
+├── test_loader.py                   # plugin entry-point loader
+└── test_cli.py                      # bamboo CLI
 ```
 
 ### Testing strategy
