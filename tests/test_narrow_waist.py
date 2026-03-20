@@ -267,9 +267,15 @@ def _build_patches() -> list[tuple[str, Any]]:
         ("bamboo.tools.llm_passthrough.get_llm_manager", MagicMock(return_value=fake_manager)),
         ("bamboo.tools.planner.get_llm_selector", MagicMock(return_value=fake_selector)),
         ("bamboo.tools.planner.get_llm_manager", MagicMock(return_value=fake_manager)),
-        # job_status and log_analysis call downstream MCP server
+        # job_status calls downstream MCP server
         ("bamboo.tools.job_status.get_mcp_caller", MagicMock(return_value=mcp_caller)),
-        ("bamboo.tools.log_analysis.get_mcp_caller", MagicMock(return_value=mcp_caller)),
+        # log_analysis makes direct HTTP calls (metadata + log download)
+        ("askpanda_atlas.log_analysis_impl._fetch_metadata",
+         MagicMock(return_value={
+             "job": {"jobstatus": "failed", "piloterrorcode": 0, "piloterrordiag": ""},
+             "files": [], "dsfiles": [],
+         })),
+        ("askpanda_atlas.log_analysis_impl._fetch_log_text", MagicMock(return_value=None)),
         # task_status makes an HTTP fetch
         ("bamboo.tools.task_status_atlas.fetch_jsonish", fetch_mock),
     ]
@@ -345,7 +351,12 @@ async def test_evidence_tool_text_is_json_with_evidence_key(tool_name: str) -> N
 
     with (
         patch("bamboo.tools.job_status.get_mcp_caller", return_value=mcp_caller),
-        patch("bamboo.tools.log_analysis.get_mcp_caller", return_value=mcp_caller),
+        patch("askpanda_atlas.log_analysis_impl._fetch_metadata",
+              return_value={
+                  "job": {"jobstatus": "failed", "piloterrorcode": 0, "piloterrordiag": ""},
+                  "files": [], "dsfiles": [],
+              }),
+        patch("askpanda_atlas.log_analysis_impl._fetch_log_text", return_value=None),
         patch("bamboo.tools.task_status_atlas.fetch_jsonish", fetch_mock),
     ):
         result = await tool.call(args)

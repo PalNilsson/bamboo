@@ -64,6 +64,7 @@ ANSWER_TOOL_CANDIDATES: List[str] = ["bamboo_answer", "askpanda_answer", "bamboo
 
 
 _TASK_CMD_RE = re.compile(r"^/task\s+(\d{1,12})\s*$", re.IGNORECASE)
+_JOB_CMD_RE = re.compile(r"^/job\s+(\d{1,12})\s*$", re.IGNORECASE)
 
 FALLBACK_BANNER = r"""
     _        _     ____            ____     _
@@ -690,11 +691,11 @@ class BambooTui(App):
     async def _handle_command(self, cmdline: str) -> None:
         """Handle slash commands.
 
-        Dispatches the ``/task <id>`` shorthand directly, then delegates all
-        other commands to :meth:`_dispatch_slash_command`.
+        Dispatches the ``/task <id>`` and ``/job <id>`` shorthands directly,
+        then delegates all other commands to :meth:`_dispatch_slash_command`.
 
         Args:
-            cmdline (str): Raw command line beginning with ``/``.
+            cmdline: Raw command line beginning with ``/``.
         """
         m_task = _TASK_CMD_RE.match(cmdline.strip())
         if m_task:
@@ -703,6 +704,15 @@ class BambooTui(App):
                 f"Summarize the status of task {task_id} including dataset info."
             )
             return
+
+        m_job = _JOB_CMD_RE.match(cmdline.strip())
+        if m_job:
+            job_id = m_job.group(1)
+            await self._handle_question(
+                f"Analyse the failure of job {job_id} and explain why it failed."
+            )
+            return
+
         await self._dispatch_slash_command(cmdline)
 
     async def _dispatch_slash_command(self, cmdline: str) -> None:
@@ -754,6 +764,7 @@ class BambooTui(App):
             "  /help                 Show this help\n"
             "  /tools                List tools exposed by the MCP server\n"
             "  /task <id>             Shorthand for: status of task <id>\n"
+            "  /job <id>              Shorthand for: analyse failure of job <id>\n"
             "  /json                 Show full raw server JSON for last response\n"
             "  /tracing              Show timing + trace spans for last request\n"
             "  /history              Show turns currently held in context memory\n"
