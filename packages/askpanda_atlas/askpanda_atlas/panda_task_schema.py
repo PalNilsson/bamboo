@@ -339,6 +339,7 @@ class PandaJob:
         }
 
     def __repr__(self) -> str:  # pragma: no cover
+        """Return a concise developer-readable representation of this job."""
         return (
             f"PandaJob(pandaid={self.pandaid}, "
             f"status={self.jobstatus}, "
@@ -413,6 +414,7 @@ class PandaTaskData:
         return dict(self._raw)
 
     def __repr__(self) -> str:  # pragma: no cover
+        """Return a concise developer-readable representation of this task."""
         first = self.jobs[0].pandaid if self.jobs else None
         return (
             f"PandaTaskData(total_jobs={len(self.jobs)}, "

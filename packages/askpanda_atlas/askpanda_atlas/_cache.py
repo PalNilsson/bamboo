@@ -122,7 +122,7 @@ def cached_fetch_jsonish(
     timeout: int = 30,
     ttl: float = METADATA_TTL,
 ) -> tuple[int, str, str, dict[str, Any] | None]:
-    """Cached wrapper around :func:`~askpanda_atlas._fallback_http.fetch_jsonish`.
+    """Fetch a URL via fetch_jsonish, returning the cached result on repeat calls.
 
     On a cache hit, returns the previously fetched 4-tuple without making
     an HTTP request.  On a miss, delegates to the real ``fetch_jsonish``,
@@ -155,7 +155,7 @@ def cached_fetch_log(
     url: str,
     timeout: int = 60,
 ) -> str | None:
-    """Cached wrapper for downloading a log file via ``requests.get``.
+    """Fetch a log file via requests.get, returning the cached result on repeat calls.
 
     Log files are immutable once written, so hits are cached with
     :data:`LOG_TTL` (``math.inf``) — they are never re-downloaded within
