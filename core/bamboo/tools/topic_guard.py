@@ -51,6 +51,11 @@ _ALLOW_TERMS: list[str] = [
     # Infrastructure
     "condor", "arc", "cream", "htcondor", "slurm", "batch",
     "computing element", "worker node",
+    # Social / conversational — greetings and acknowledgements must never be
+    # refused.  bamboo_answer intercepts these before the guard runs, but
+    # listing them here ensures they pass keyword_allow even if that
+    # intercept is somehow bypassed (defence in depth).
+    "hello", "hi", "hey", "thanks", "thank you", "cheers", "good morning", "good afternoon", "good evening",
 ]
 
 # Questions containing any of these terms (and none of the allow terms) are

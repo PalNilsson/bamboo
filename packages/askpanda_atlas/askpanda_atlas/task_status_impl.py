@@ -1,79 +1,179 @@
-"""ATLAS PanDA task status tool — canonical implementation.
+"""Implementation of ``panda_task_status`` using the richer jobs endpoint.
 
-Fetches task metadata from BigPanDA and returns structured evidence
-suitable for LLM summarisation.
+Fetches ``GET /jobs/?jeditaskid={task_id}&json`` from BigPanDA, parses the
+response with :mod:`askpanda_atlas.panda_task_schema`, and returns a compact
+evidence dict that is safe to embed in an LLM synthesis prompt.
 
-Interface
----------
-- ``panda_task_status_tool.get_definition()`` — MCP tool definition
-- ``await panda_task_status_tool.call(arguments)`` — returns dict with
-  ``evidence`` and ``text`` keys
+Public surface (mirrors ``log_analysis_impl`` pattern exactly):
 
-Evidence keys
--------------
-task_id, monitor_url, fetched_url, http_status, content_type,
-status, superstatus, taskname, username, creationdate, starttime,
-endtime, dsinfo, datasets_summary, job_counts, payload (full JSON).
+- ``get_definition()`` — MCP tool definition dict
+- ``PandaTaskStatusTool`` — MCP tool class with ``get_definition()`` and
+  async ``call()``
+- ``panda_task_status_tool`` — singleton instance
+
+Design rules (per Bamboo architecture):
+
+* All ``bamboo.tools.base`` imports are **deferred inside ``call()``** —
+  never at module level.  This keeps every pure helper importable without
+  bamboo installed, which is required by the fallback shim.
+* Blocking HTTP is wrapped in ``asyncio.to_thread()``.
+* ``call()`` never raises — errors are returned as ``text_content`` payloads.
 """
+
 from __future__ import annotations
 
-import json
-
 import asyncio
+import json
 import logging
+import os
 from typing import Any
-
-from askpanda_atlas._fallback_http import (
-    datasets_summary,
-    fetch_jsonish,
-    get_base_url,
-    job_counts_from_payload,
-)
-from bamboo.tools.base import MCPContent, text_content
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# HTTP helper
+# ---------------------------------------------------------------------------
 
-def get_definition() -> dict[str, Any]:
-    """Return the MCP tool definition for the task status tool.
+_JOBS_PATH: str = "/jobs/"
+
+
+def _jobs_url(base_url: str, task_id: int) -> str:
+    """Build the BigPanDA jobs endpoint URL for a given task ID.
+
+    Args:
+        base_url: BigPanDA base URL, e.g. ``"https://bigpanda.cern.ch"``.
+        task_id: JEDI task identifier.
 
     Returns:
-        A dict with ``name``, ``description``, ``inputSchema``,
-        ``examples``, and ``tags`` keys.
+        Full URL string ready for an HTTP GET request.
+    """
+    return f"{base_url.rstrip('/')}{_JOBS_PATH}?jeditaskid={task_id}&json"
+
+
+# ---------------------------------------------------------------------------
+# Core synchronous fetch — no bamboo dependency
+# ---------------------------------------------------------------------------
+
+
+def fetch_and_analyse(base_url: str, task_id: int) -> dict[str, Any]:
+    """Fetch task jobs from BigPanDA and return a compact evidence dict.
+
+    Synchronous; call via ``asyncio.to_thread()`` from async contexts.
+    Imports from :mod:`askpanda_atlas` locally so the function remains
+    usable from fallback stubs that lack bamboo core.
+
+    ``fetch_jsonish`` returns a 4-tuple
+    ``(status_code, content_type, body_text, parsed_json_or_none)``.
+    Non-2xx responses and non-JSON bodies are treated as errors.
+
+    Args:
+        base_url: BigPanDA base URL (no trailing slash).
+        task_id: JEDI task identifier to query.
+
+    Returns:
+        Evidence dictionary produced by
+        :func:`~askpanda_atlas.panda_task_schema.build_evidence`, augmented
+        with ``"task_id"`` and ``"endpoint"`` keys.
+
+    Raises:
+        RuntimeError: If the HTTP response is non-2xx or not a JSON dict.
+    """
+    from askpanda_atlas._cache import cached_fetch_jsonish  # type: ignore[import]
+    from askpanda_atlas.panda_task_schema import (  # type: ignore[import]
+        PandaTaskData,
+        build_evidence,
+    )
+
+    url = _jobs_url(base_url, task_id)
+    logger.debug("panda_task_status: fetching %s", url)
+
+    status, ctype, body, payload = cached_fetch_jsonish(url)
+
+    if status < 200 or status >= 300:
+        raise RuntimeError(
+            f"HTTP {status} fetching task {task_id} from {url}"
+        )
+    if payload is None:
+        snippet = body[:200] if body else ""
+        raise RuntimeError(
+            f"Non-JSON response (content-type={ctype!r}) for task {task_id}: {snippet!r}"
+        )
+
+    task = PandaTaskData(payload)
+    evidence = build_evidence(task)
+    evidence["task_id"] = task_id
+    evidence["endpoint"] = url
+    # Store the verbatim BigPanDA response alongside the evidence so the
+    # bamboo_last_evidence tool can serve it via /json without re-fetching.
+    # raw_payload is intentionally NOT sent to the LLM — it is stripped by
+    # BambooLastEvidenceTool.call() when mode='evidence'.
+    evidence["raw_payload"] = payload
+
+    logger.debug(
+        "panda_task_status: task_id=%d total_jobs=%d",
+        task_id,
+        evidence.get("total_jobs", 0),
+    )
+    return evidence
+
+
+# ---------------------------------------------------------------------------
+# MCP tool definition
+# ---------------------------------------------------------------------------
+
+
+def get_definition() -> dict[str, Any]:
+    """Return the MCP tool definition for ``panda_task_status``.
+
+    Returns:
+        Tool definition dict compatible with MCP discovery.
     """
     return {
         "name": "panda_task_status",
         "description": (
-            "Get the current status, progress, and metadata of a PanDA task "
-            "by its task ID (jeditaskid). Use when the question is about a "
-            "specific task: its status, completion rate, dataset info, error "
-            "counts, or list of jobs. For individual job questions, use "
-            "panda_job_status instead."
+            "Fetch full job-level detail for a PanDA task from BigPanDA. "
+            "Returns a task summary, per-status / per-site / per-error-code "
+            "job counts, a sample of failed and finished jobs with error "
+            "diagnostics, and (for small tasks) the complete list of PanDA "
+            "job IDs. Use this tool when the user asks about a task, its "
+            "overall status, which jobs failed, or which sites are involved."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "task_id": {"type": "integer", "description": "PanDA task ID (jeditaskid)"},
-                "query": {"type": "string", "description": "Original user query (optional)"},
+                "task_id": {
+                    "type": "integer",
+                    "description": "The JEDI task ID (jeditaskid) to query.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Original user question (used by synthesiser).",
+                },
                 "include_jobs": {
                     "type": "boolean",
-                    "description": "Include job records in the response (default true, adds ?jobs=1).",
+                    "description": "Unused; accepted for planner compatibility.",
                 },
-                "timeout": {"type": "integer", "description": "HTTP timeout in seconds (default 30)"},
             },
             "required": ["task_id"],
             "additionalProperties": False,
         },
-        "examples": [{"task_id": 48432100, "query": "What happened to task 48432100?"}],
-        "tags": ["atlas", "panda", "bigpanda", "monitoring"],
     }
 
 
+# ---------------------------------------------------------------------------
+# Tool class
+# ---------------------------------------------------------------------------
+
+
 class PandaTaskStatusTool:
-    """MCP tool for fetching PanDA task status and metadata from BigPanDA."""
+    """MCP tool that fetches and summarises a PanDA task from BigPanDA.
+
+    Uses the richer ``GET /jobs/?jeditaskid={id}&json`` endpoint and
+    returns a compact evidence dict structured for LLM summarisation.
+    """
 
     def __init__(self) -> None:
-        """Initialise with the tool definition."""
+        """Initialise with the cached tool definition."""
         self._def: dict[str, Any] = get_definition()
 
     def get_definition(self) -> dict[str, Any]:
@@ -84,124 +184,59 @@ class PandaTaskStatusTool:
         """
         return self._def
 
-    async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:
-        """Fetch task status and return structured evidence.
+    async def call(self, arguments: dict[str, Any]) -> list[Any]:
+        """Fetch task data and return structured evidence as MCP content.
 
-        The result is a one-element ``list[MCPContent]`` whose ``text`` field
-        contains the JSON-serialised evidence dict.  Callers that need the raw
-        evidence should parse ``json.loads(result[0]["text"])``.  This keeps
-        the tool compliant with the MCP narrow-waist contract.
+        ``bamboo.tools.base`` is imported here (deferred) so the rest of
+        this module remains importable when bamboo core is not installed.
+        All blocking HTTP is offloaded via ``asyncio.to_thread``.
 
         Args:
-            arguments: Dict with required ``task_id`` (int) and optional
-                ``query`` (str), ``include_jobs`` (bool), ``timeout`` (int).
+            arguments: Dict with required ``"task_id"`` (int) and optional
+                ``"query"`` (str) and ``"include_jobs"`` (bool).
 
         Returns:
             One-element MCP content list containing the JSON-serialised
-            evidence and text summary.
+            evidence dict, or an error payload if anything goes wrong.
         """
-        if not isinstance(arguments, dict):
-            return text_content(json.dumps({"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}))
+        from bamboo.tools.base import text_content  # deferred — see module docstring
 
-        task_id = arguments.get("task_id")
-        if task_id is None:
-            return text_content(json.dumps({"evidence": {"error": "missing task_id", "provided": str(arguments)}}))
+        base_url: str = os.environ.get("PANDA_BASE_URL", "https://bigpanda.cern.ch")
 
-        try:
-            task_id_int = int(task_id)
-        except Exception:  # pylint: disable=broad-exception-caught
-            return text_content(json.dumps({"evidence": {"error": "task_id must be an integer", "provided": str(arguments)}}))
-
-        include_jobs: bool = bool(arguments.get("include_jobs", True))
-
-        timeout: int = 30
-        try:
-            timeout = int(arguments.get("timeout") or 30)
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
-
-        base_url = get_base_url()
-        monitor_url = f"{base_url}/task/{task_id_int}/"
-        json_url = f"{monitor_url}?json" + ("&jobs=1" if include_jobs else "")
-
-        try:
-            http_status, content_type, text, payload = await asyncio.to_thread(
-                fetch_jsonish, json_url, timeout
-            )
-        except Exception as e:  # pylint: disable=broad-exception-caught
+        task_id_raw = arguments.get("task_id")
+        if task_id_raw is None:
             return text_content(json.dumps({
-                "evidence": {
-                    "task_id": task_id_int,
-                    "monitor_url": monitor_url,
-                    "fetched_url": json_url,
-                    "error": repr(e),
-                },
-                "text": f"Failed to fetch task {task_id_int} metadata (network error).",
+                "evidence": {"error": "task_id argument is required."},
             }))
 
-        # Non-JSON or HTTP error
-        if payload is None:
-            snippet = (text or "").strip().replace("\n", " ")
-            if len(snippet) > 400:
-                snippet = snippet[:400] + "…"
-            # BigPanDA returns HTTP 200 with an HTML page for unknown tasks
-            # rather than a 404, so detect the not-found condition from the body.
-            snippet_lower = snippet.lower()
-            html_not_found = (
-                "text/html" in content_type and
-                any(marker in snippet_lower for marker in (
-                    "not found", "does not exist", "no such task",
-                    "task not found", "unknown task",
-                ))
-            )
-            evidence: dict[str, Any] = {
-                "task_id": task_id_int,
-                "monitor_url": monitor_url,
-                "fetched_url": json_url,
-                "http_status": http_status,
-                "content_type": content_type,
-                "response_snippet": snippet,
-            }
-            if http_status == 404 or html_not_found:
-                evidence["not_found"] = True
-                msg = f"Task {task_id_int} was not found in BigPanDA."
-            elif http_status >= 400:
-                msg = f"BigPanDA returned HTTP {http_status} when fetching task {task_id_int}."
-            else:
-                msg = f"BigPanDA returned a non-JSON response for task {task_id_int}."
-            return text_content(json.dumps({"evidence": evidence, "text": msg}))
+        try:
+            task_id = int(task_id_raw)
+        except (ValueError, TypeError):
+            return text_content(json.dumps({
+                "evidence": {
+                    "error": f"task_id must be an integer, got {task_id_raw!r}.",
+                },
+            }))
 
-        # Extract common task fields
-        task: dict[str, Any] = payload.get("task", {}) if isinstance(payload.get("task"), dict) else {}
-        status = (task.get("status") if task else None) or payload.get("status")
-
-        evidence = {
-            "task_id": task_id_int,
-            "monitor_url": monitor_url,
-            "fetched_url": json_url,
-            "http_status": http_status,
-            "content_type": content_type,
-            "status": status,
-            "superstatus": task.get("superstatus") if task else None,
-            "taskname": task.get("taskname") if task else None,
-            "username": task.get("username") if task else None,
-            "creationdate": task.get("creationdate") if task else None,
-            "starttime": task.get("starttime") if task else None,
-            "endtime": task.get("endtime") if task else None,
-            "dsinfo": task.get("dsinfo") if task else None,
-            "datasets_summary": datasets_summary(payload),
-            "job_counts": job_counts_from_payload(payload),
-            "payload": payload,
-        }
-
-        summary = (
-            f"Task {task_id_int} status: {status}."
-            if status
-            else f"Task {task_id_int} metadata fetched."
-        )
-        return text_content(json.dumps({"evidence": evidence, "text": summary}))
+        try:
+            evidence = await asyncio.to_thread(fetch_and_analyse, base_url, task_id)
+            return text_content(json.dumps({"evidence": evidence}))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("panda_task_status failed for task_id=%d", task_id)
+            return text_content(json.dumps({
+                "evidence": {
+                    "task_id": task_id,
+                    "error": repr(exc),
+                },
+                "text": f"Error fetching task {task_id}: {exc}",
+            }))
 
 
 panda_task_status_tool = PandaTaskStatusTool()
 
-__all__ = ["PandaTaskStatusTool", "panda_task_status_tool", "get_definition"]
+__all__ = [
+    "PandaTaskStatusTool",
+    "fetch_and_analyse",
+    "get_definition",
+    "panda_task_status_tool",
+]

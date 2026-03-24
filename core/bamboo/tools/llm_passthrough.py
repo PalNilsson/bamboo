@@ -116,7 +116,6 @@ class LLMPassthroughTool:
             raise RuntimeError("LLM selector does not expose a registry.")
 
         model_spec = registry.get(default_profile)
-        debug = f"[LLM selected] provider={model_spec.provider} model={model_spec.model}"
         client = await manager.get_client(model_spec)
 
         temperature = float(arguments.get("temperature", 0.2))
@@ -157,7 +156,7 @@ class LLMPassthroughTool:
                     input_tokens=_usage.input_tokens if _usage else None,
                     output_tokens=_usage.output_tokens if _usage else None,
                 )
-            return text_content(f"{debug}\n\n{resp.text}")
+            return text_content(resp.text)
         except LLMError:
             # Re-raise so the orchestrating tool (bamboo_answer) can apply its
             # own friendly-error handler.  Do not swallow here — the span will
@@ -166,3 +165,27 @@ class LLMPassthroughTool:
 
 
 bamboo_llm_answer_tool = LLMPassthroughTool()
+
+
+def get_llm_info() -> str:
+    """Return a human-readable string describing the active LLM provider and model.
+
+    Used by the TUI to display the LLM selection once at startup rather than
+    repeating it in every response panel.
+
+    Returns:
+        String of the form ``"provider=<p> model=<m>"``, or an empty string
+        if the selector is not yet configured.
+    """
+    try:
+        selector = get_llm_selector()
+        registry = getattr(selector, "registry", None)
+        if registry is None:
+            return ""
+        default_profile = getattr(selector, "default_profile", "default")
+        model_spec = registry.get(default_profile)
+        if model_spec is None:
+            return ""
+        return f"provider={model_spec.provider} model={model_spec.model}"
+    except Exception:  # pylint: disable=broad-exception-caught
+        return ""

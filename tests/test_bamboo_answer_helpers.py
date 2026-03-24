@@ -19,6 +19,9 @@ import bamboo.tools.bamboo_executor as ex_mod
 from bamboo.tools.bamboo_answer import (
     _extract_job_id,
     _extract_task_id,
+    _extract_id_from_history,
+    _is_contextual_followup,
+    _is_implicit_contextual_followup,
     _is_log_analysis_request,
 )
 from bamboo.tools.bamboo_executor import (
@@ -333,3 +336,198 @@ class TestRetrieveRagContext:
         ):
             ctx = await retrieve_rag_context("test question")
         assert ctx == ""
+
+
+# ---------------------------------------------------------------------------
+# Contextual follow-up routing helpers (added with history ID extraction)
+# ---------------------------------------------------------------------------
+
+
+class TestIsContextualFollowup:
+    """Tests for :func:`bamboo_answer._is_contextual_followup`.
+
+    Only tests explicit pronoun/demonstrative back-references.
+    Implicit short follow-ups are handled by _is_implicit_contextual_followup.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "How many of those jobs failed?",
+        "Which of them are at BNL?",
+        "What is the status of that task?",
+        "Are those jobs still running?",
+        "What error did it produce?",
+        "How many of the jobs are finished?",
+        "Tell me about the results",
+        "What happened to them?",
+        "What is its piloterrorcode?",
+        "Can you analyse that job?",
+    ])
+    def test_contextual_followup_detected(self, text: str) -> None:
+        """Explicit pronoun/demonstrative back-references are detected."""
+        assert _is_contextual_followup(text), f"Expected match for: {text!r}"
+
+    @pytest.mark.parametrize("text", [
+        "What is PanDA?",
+        "How does brokerage work?",
+        "How many jobs finished?",   # no back-reference — handled by implicit path
+        "Which sites are used?",     # no back-reference — handled by implicit path
+        "hello",
+        "thanks",
+        "",
+        "Tell me more",
+    ])
+    def test_non_contextual_not_detected(self, text: str) -> None:
+        """Questions without explicit back-references are not matched."""
+        assert not _is_contextual_followup(text), f"Expected no match for: {text!r}"
+
+
+class TestIsImplicitContextualFollowup:
+    """Tests for :func:`bamboo_answer._is_implicit_contextual_followup`."""
+
+    @pytest.mark.parametrize("text", [
+        "How many jobs finished?",
+        "How many jobs are running?",
+        "Which sites are used?",
+        "How many are still running?",
+        "Any jobs still transferring?",
+        "How many failed?",
+        "Any errors?",
+    ])
+    def test_implicit_followup_detected(self, text: str) -> None:
+        """Short questions with domain status words are detected."""
+        assert _is_implicit_contextual_followup(text), f"Expected match for: {text!r}"
+
+    @pytest.mark.parametrize("text", [
+        # Social / general — no domain word
+        "What is PanDA?",
+        "How does brokerage work?",
+        "hello",
+        "thanks",
+        "",
+        "Tell me more",
+        # Long questions — above word limit even with domain words
+        "Explain the JEDI architecture in detail and how it relates to task scheduling",
+        "What are the main components of the PanDA workload management system?",
+        "How does the pilot framework interact with the workload management system?",
+    ])
+    def test_non_implicit_not_detected(self, text: str) -> None:
+        """Social messages and long doc questions are not matched."""
+        assert not _is_implicit_contextual_followup(text), f"Expected no match for: {text!r}"
+
+
+class TestExtractIdFromHistory:
+    """Tests for :func:`bamboo_answer._extract_id_from_history`."""
+
+    def test_extracts_task_id_from_user_turn(self) -> None:
+        """A task ID in a prior user turn is found."""
+        history = [
+            {"role": "user", "content": "Summarize task 49375514"},
+            {"role": "assistant", "content": "Task 49375514 has 84 jobs."},
+        ]
+        task_id, job_id = _extract_id_from_history(history)
+        assert task_id == 49375514
+        assert job_id is None
+
+    def test_extracts_task_id_from_assistant_turn(self) -> None:
+        """A task ID mentioned only in an assistant reply is still found."""
+        history = [
+            {"role": "user", "content": "What about that task?"},
+            {"role": "assistant", "content": "Task 49375514 is currently running."},
+        ]
+        task_id, _ = _extract_id_from_history(history)
+        assert task_id == 49375514
+
+    def test_extracts_job_id_from_history(self) -> None:
+        """A job ID in history is extracted correctly."""
+        history = [
+            {"role": "user", "content": "Analyse job 7061545370"},
+            {"role": "assistant", "content": "Job 7061545370 failed with pilot error 1008."},
+        ]
+        _, job_id = _extract_id_from_history(history)
+        assert job_id == 7061545370
+
+    def test_most_recent_id_wins(self) -> None:
+        """When multiple IDs appear in history, the most recent is returned."""
+        history = [
+            {"role": "user", "content": "Check task 11111111"},
+            {"role": "assistant", "content": "Task 11111111 is done."},
+            {"role": "user", "content": "Now check task 22222222"},
+            {"role": "assistant", "content": "Task 22222222 is running."},
+        ]
+        task_id, _ = _extract_id_from_history(history)
+        assert task_id == 22222222
+
+    def test_empty_history_returns_none(self) -> None:
+        """Empty history yields (None, None)."""
+        assert _extract_id_from_history([]) == (None, None)
+
+    def test_history_with_no_ids_returns_none(self) -> None:
+        """History containing no IDs yields (None, None)."""
+        history = [
+            {"role": "user", "content": "What is PanDA?"},
+            {"role": "assistant", "content": "PanDA is a workload manager."},
+        ]
+        assert _extract_id_from_history(history) == (None, None)
+
+
+class TestContextualFollowupRouting:
+    """Integration tests: contextual follow-ups route to the correct tool."""
+
+    @pytest.mark.asyncio
+    async def test_contextual_followup_routes_to_task_status(self) -> None:
+        """'How many of those jobs failed?' with task history → panda_task_status."""
+        import bamboo.tools.bamboo_answer as ba_mod
+        from bamboo.tools.bamboo_answer import BambooAnswerTool
+        from bamboo.tools.topic_guard import GuardResult
+
+        guard_mock = AsyncMock(return_value=GuardResult(
+            allowed=True, reason="keyword_allow", llm_used=False
+        ))
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "0 jobs failed."}])
+        tool = BambooAnswerTool()
+
+        history = [
+            {"role": "user", "content": "What are the panda jobs in task 49375514?"},
+            {"role": "assistant", "content": "Task 49375514 has 84 jobs."},
+        ]
+
+        with (
+            patch.object(ba_mod, "check_topic", guard_mock),
+            patch.object(ba_mod, "execute_plan", execute_mock),
+        ):
+            await tool.call({
+                "question": "How many of those jobs failed?",
+                "messages": [
+                    *history,
+                    {"role": "user", "content": "How many of those jobs failed?"},
+                ],
+            })
+
+        execute_mock.assert_awaited_once()
+        plan = execute_mock.call_args[0][0]
+        assert plan.tool_calls[0].tool == "panda_task_status"
+        assert plan.tool_calls[0].arguments["task_id"] == 49375514
+
+    @pytest.mark.asyncio
+    async def test_genuine_doc_question_still_routes_to_rag(self) -> None:
+        """A question with no back-reference and no ID still goes to RAG."""
+        import bamboo.tools.bamboo_answer as ba_mod
+        from bamboo.tools.bamboo_answer import BambooAnswerTool
+        from bamboo.tools.topic_guard import GuardResult
+
+        guard_mock = AsyncMock(return_value=GuardResult(
+            allowed=True, reason="keyword_allow", llm_used=False
+        ))
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA info."}])
+        tool = BambooAnswerTool()
+
+        with (
+            patch.object(ba_mod, "check_topic", guard_mock),
+            patch.object(ba_mod, "execute_plan", execute_mock),
+        ):
+            await tool.call({"question": "How does brokerage work?"})
+
+        execute_mock.assert_awaited_once()
+        plan = execute_mock.call_args[0][0]
+        tool_names = [tc.tool for tc in plan.tool_calls]
+        assert "panda_doc_search" in tool_names or "panda_doc_bm25" in tool_names

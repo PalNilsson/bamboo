@@ -5,6 +5,20 @@ from bamboo.tools.base import text_content
 from bamboo.config import Config
 
 
+def _llm_info() -> str:
+    """Return a short LLM provider/model string for the health response.
+
+    Returns:
+        ``"provider=<p> model=<m>"`` or ``"not configured"`` on any error.
+    """
+    try:
+        from bamboo.tools.llm_passthrough import get_llm_info  # pylint: disable=import-outside-toplevel
+        info = get_llm_info()
+        return info if info else "not configured"
+    except Exception:  # pylint: disable=broad-exception-caught
+        return "not configured"
+
+
 class HealthTool:
     """Provide a simple health/status reporting tool for Bamboo.
 
@@ -60,7 +74,8 @@ class HealthTool:
             f"- name: {cfg.SERVER_NAME}\n"
             f"- version: {cfg.SERVER_VERSION}\n"
             f"- ENABLE_REAL_PANDA: {cfg.ENABLE_REAL_PANDA}\n"
-            f"- ENABLE_REAL_LLM: {cfg.ENABLE_REAL_LLM}"
+            f"- ENABLE_REAL_LLM: {cfg.ENABLE_REAL_LLM}\n"
+            f"- llm_info: {_llm_info()}"
         )
 
 

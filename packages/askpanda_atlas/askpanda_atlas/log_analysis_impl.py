@@ -36,9 +36,7 @@ import re
 from collections import deque
 from typing import Any
 
-import requests
-
-from askpanda_atlas._fallback_http import fetch_jsonish, get_base_url
+from askpanda_atlas._fallback_http import get_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +87,11 @@ _MAX_EXCERPT_CHARS: int = 6000
 # ---------------------------------------------------------------------------
 
 def _fetch_metadata(job_id: int, base_url: str, timeout: int) -> dict[str, Any] | None:
-    """Fetch job metadata JSON from BigPanDA.
+    """Fetch job metadata JSON from BigPanDA, using the in-process TTL cache.
+
+    Results are cached for :data:`~askpanda_atlas._cache.METADATA_TTL`
+    seconds (60 s) so follow-up questions within the same session do not
+    trigger redundant HTTP requests.
 
     Args:
         job_id: PanDA job ID.
@@ -100,8 +102,10 @@ def _fetch_metadata(job_id: int, base_url: str, timeout: int) -> dict[str, Any] 
         Parsed JSON dict (with ``job``, ``files``, ``dsfiles`` keys) or
         ``None`` on failure.
     """
+    from askpanda_atlas._cache import cached_fetch_jsonish  # type: ignore[import]
+
     url = f"{base_url}/job?pandaid={job_id}&json"
-    status, _ctype, _text, payload = fetch_jsonish(url, timeout)
+    status, _ctype, _text, payload = cached_fetch_jsonish(url, timeout)
     if status < 200 or status >= 300 or payload is None:
         logger.warning("Metadata fetch failed for job %d: HTTP %d", job_id, status)
         return None
@@ -109,10 +113,12 @@ def _fetch_metadata(job_id: int, base_url: str, timeout: int) -> dict[str, Any] 
 
 
 def _fetch_log_text(job_id: int, filename: str, base_url: str, timeout: int) -> str | None:
-    """Download a pilot or payload log file from BigPanDA filebrowser.
+    """Download a pilot or payload log file, using the in-process cache.
 
-    Streams the response to avoid holding multi-MB logs in a single
-    allocation; the caller extracts only the relevant context window.
+    Log files are immutable once written, so hits are cached for the
+    lifetime of the process via :func:`~askpanda_atlas._cache.cached_fetch_log`
+    (TTL = ``math.inf``).  A log that has been downloaded once is never
+    re-fetched.
 
     Args:
         job_id: PanDA job ID.
@@ -121,26 +127,14 @@ def _fetch_log_text(job_id: int, filename: str, base_url: str, timeout: int) -> 
         timeout: HTTP timeout in seconds.
 
     Returns:
-        Full log text as a string, or ``None`` if the download fails or
-        the file is not found.
+        Full log text as a string, or ``None`` if the file is not found
+        or the download fails.
     """
+    from askpanda_atlas._cache import cached_fetch_log  # type: ignore[import]
+
     url = f"{base_url}/filebrowser/?pandaid={job_id}&json&filename={filename}"
-    logger.info("Fetching log: %s", url)
-    try:
-        resp = requests.get(
-            url,
-            timeout=timeout,
-            headers={"User-Agent": "AskPanDA/1.0"},
-            stream=True,
-        )
-        if resp.status_code == 404:
-            logger.info("Log file not found (404): %s", filename)
-            return None
-        resp.raise_for_status()
-        return resp.text
-    except requests.RequestException as exc:
-        logger.warning("Log download failed for job %d / %s: %s", job_id, filename, exc)
-        return None
+    logger.info("Fetching log (cache-aware): %s", url)
+    return cached_fetch_log(url, timeout)
 
 
 # ---------------------------------------------------------------------------

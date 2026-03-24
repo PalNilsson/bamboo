@@ -20,7 +20,7 @@ they do **not** drive routing decisions any more.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Sequence
 
 from bamboo.llm.exceptions import LLMError
 from bamboo.llm.types import Message
@@ -46,6 +46,70 @@ _LOG_PATTERN = re.compile(
     r"(?i)(?:analyz?e|analys[ei]|why|fail|log|diagnos)[^.]{0,60}"
     r"\bjob[:#/\-\s]+([0-9]{4,12})\b"
 )
+
+# ---------------------------------------------------------------------------
+# Social routing — greetings and acknowledgements handled with zero LLM cost.
+# Intercepted in _route() before the topic guard runs so "hello" and "thanks"
+# never reach the LLM or produce a refusal.
+# ---------------------------------------------------------------------------
+
+_GREETING_RE: re.Pattern[str] = re.compile(
+    r"^\s*("
+    r"h+e+l+l*o+|"
+    r"h+i+[!]*|"
+    r"hey+[!]*|"
+    r"good\s+(?:morning|afternoon|evening|day)|"
+    r"howdy|greetings|sup|yo"
+    r")[!.,\s]*$",
+    re.IGNORECASE,
+)
+
+_ACK_RE: re.Pattern[str] = re.compile(
+    r"^\s*("
+    r"thanks?(?:\s+(?:a\s+lot|so\s+much|very\s+much|for\s+that))?|"
+    r"thank\s+you(?:\s+(?:so\s+much|very\s+much))?|"
+    r"thx|cheers|great|perfect|awesome|sounds?\s+good|got\s+it|"
+    r"ok(?:ay)?|cool|nice|brilliant|excellent|wonderful|"
+    r"understood|noted|roger(?:\s+that)?|good\s+to\s+know|"
+    r"that(?:'s|\s+is)\s+(?:helpful|great|perfect|useful)|"
+    r"bye|goodbye|see\s+you(?:\s+later)?"
+    r")(?:\s*[,!.]\s*(?:thanks?|cheers|please|much\s+appreciated)?)?[!.\s]*$",
+    re.IGNORECASE,
+)
+
+_GREETING_RESPONSE: str = (
+    "Hello! I'm AskPanDA — ask me about PanDA tasks, jobs, pilots, "
+    "computing sites, or ATLAS grid workflows. "
+    "Try asking about a task ID, a failed job, or a site's current status."
+)
+
+_ACK_RESPONSE: str = (
+    "You're welcome — let me know if there's anything else I can help with."
+)
+
+
+def _is_greeting(text: str) -> bool:
+    """Return True if *text* is a standalone greeting with no content query.
+
+    Args:
+        text: The raw user message string.
+
+    Returns:
+        True when the entire message matches a common greeting pattern.
+    """
+    return bool(_GREETING_RE.match(text.strip()))
+
+
+def _is_ack(text: str) -> bool:
+    """Return True if *text* is a standalone acknowledgement or sign-off.
+
+    Args:
+        text: The raw user message string.
+
+    Returns:
+        True when the entire message matches a common acknowledgement pattern.
+    """
+    return bool(_ACK_RE.match(text.strip()))
 
 
 def _extract_task_id(text: str) -> int | None:
@@ -320,6 +384,48 @@ _FOLLOWUP_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Matches questions that refer back to a previous result by pronoun or
+# demonstrative — i.e. they have no ID of their own but are clearly
+# about the most recently discussed task or job.
+_CONTEXTUAL_FOLLOWUP_RE = re.compile(
+    r"\b("
+    r"those|them|they|their|"
+    r"that task|that job|the task|the job|the jobs|the results?|"
+    r"of those|of them|of the|"
+    r"it|its"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Domain words that, when present in a short question with no ID, signal the
+# question is about the most recently discussed task or job rather than a
+# general PanDA documentation query.
+# Deliberately excludes "task" and "job" alone (too common in doc questions)
+# in favour of status-specific terms that are unambiguous in follow-up context.
+_DOMAIN_WORD_RE = re.compile(
+    r"\b("
+    r"failed|fail|failing|"
+    r"finished|finish|finishing|"
+    r"running|started|starting|"
+    r"transferring|transferred|"
+    r"activated|activat(?:ed|ing)|"
+    r"piloterror(?:code|diag)|"
+    r"error\s+code|error\s+codes|"
+    r"how\s+many\s+(?:jobs?|are|were|did)|"
+    r"which\s+sites?|"
+    r"any\s+(?:errors?|failures?)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Questions at or below this word count are treated as implicit follow-ups
+# without requiring a domain word — they are almost never general doc queries.
+_SHORT_FOLLOWUP_WORD_LIMIT: int = 6
+
+# Questions above _SHORT_FOLLOWUP_WORD_LIMIT but at or below this limit are
+# treated as implicit follow-ups only when a domain word is also present.
+_MEDIUM_FOLLOWUP_WORD_LIMIT: int = 10
+
 
 def _is_content_free_followup(question: str) -> bool:
     """Return True if the question carries no domain-specific content.
@@ -335,6 +441,75 @@ def _is_content_free_followup(question: str) -> bool:
         True if the question matches a known content-free follow-up pattern.
     """
     return bool(_FOLLOWUP_PATTERN.match(question.strip()))
+
+
+def _is_contextual_followup(question: str) -> bool:
+    """Return True if the question contains an explicit back-reference to prior context.
+
+    Only detects *explicit* pronoun/demonstrative back-references ("those",
+    "them", "it", "that task" etc.).  Implicit short questions without a
+    back-reference are handled separately in :func:`_route` using the history
+    context to decide whether to re-use a prior ID.
+
+    Args:
+        question: The user's question text (caller has already verified
+            that no task or job ID is present).
+
+    Returns:
+        True when the question contains an explicit contextual back-reference.
+    """
+    q = question.strip()
+    return bool(_CONTEXTUAL_FOLLOWUP_RE.search(q)) if q else False
+
+
+def _is_implicit_contextual_followup(question: str) -> bool:
+    """Return True if the question is a short, domain-specific follow-up.
+
+    Used when the question has no explicit back-reference but is short and
+    contains status-specific terminology that makes sense only in the context
+    of a previously discussed task or job.  Always called *after* confirming
+    that history contains a recent task/job ID.
+
+    Args:
+        question: The user's question text (caller has verified no ID present).
+
+    Returns:
+        True when the question is ≤ :data:`_MEDIUM_FOLLOWUP_WORD_LIMIT` words
+        and contains a status-specific domain term.
+    """
+    q = question.strip()
+    if not q:
+        return False
+    word_count = len(q.split())
+    return word_count <= _MEDIUM_FOLLOWUP_WORD_LIMIT and bool(_DOMAIN_WORD_RE.search(q))
+
+
+def _extract_id_from_history(
+    history: Sequence[Any],
+) -> tuple[int | None, int | None]:
+    """Scan history backwards for the most recent task or job ID.
+
+    Searches both user and assistant turns so that IDs mentioned in the
+    assistant's answer (e.g. "Task 49375514 has 84 jobs") are also found.
+
+    Args:
+        history: Prior conversation turns in chronological order.
+
+    Returns:
+        ``(task_id, job_id)`` where each is the most recently seen integer
+        ID of that type, or ``None`` if not found.
+    """
+    task_id: int | None = None
+    job_id: int | None = None
+    for msg in reversed(history):
+        content = str(msg.get("content", ""))
+        if task_id is None:
+            task_id = _extract_task_id(content)
+        if job_id is None:
+            job_id = _extract_job_id(content)
+        if task_id is not None and job_id is not None:
+            break
+    return task_id, job_id
 
 
 def _last_user_question(history: list[Message]) -> str | None:
@@ -353,6 +528,101 @@ def _last_user_question(history: list[Message]) -> str | None:
             if content:
                 return content
     return None
+
+
+async def _bypass_response(
+    question: str,
+    history: list[Message],
+) -> list[MCPContent]:
+    """Delegate directly to the LLM passthrough tool, bypassing all routing.
+
+    Args:
+        question: The user question.
+        history: Prior conversation turns.
+
+    Returns:
+        One-element MCP content list with the LLM answer.
+    """
+    msgs: list[Message] = []
+    if history:
+        msgs.extend(history)
+    msgs.append({"role": "user", "content": question})
+    delegated = await bamboo_llm_answer_tool.call(
+        {"messages": msgs} if msgs else {"question": question}
+    )
+    if delegated and isinstance(delegated[0], dict):
+        return text_content(str(delegated[0].get("text", "")))
+    return text_content(str(delegated))
+
+
+async def _run_topic_guard(
+    question: str,
+    history: list[Message],
+) -> tuple[str, bool]:
+    """Run the topic guard and content-free followup check.
+
+    Returns the effective RAG query to use and whether the question was
+    blocked.  The caller should return the rejection message when blocked.
+
+    Args:
+        question: The current user question.
+        history: Prior conversation turns.
+
+    Returns:
+        ``(rag_query, blocked)`` where ``blocked`` is True when the topic
+        guard rejected the question.  ``rag_query`` may differ from
+        ``question`` when a content-free followup was reformulated.
+    """
+    rag_query = question
+    if history and _is_content_free_followup(question):
+        prior = _last_user_question(history)
+        if prior:
+            rag_query = prior
+        async with span(EVENT_GUARD, tool="topic_guard") as _guard_span:
+            _guard_span.set(allowed=True, reason="followup_allow", llm_used=False)
+        return rag_query, False
+
+    async with span(EVENT_GUARD, tool="topic_guard") as _guard_span:
+        guard = await check_topic(question)
+        _guard_span.set(
+            allowed=guard.allowed,
+            reason=guard.reason,
+            llm_used=guard.llm_used,
+        )
+    if not guard.allowed:
+        return guard.rejection_message, True
+    return rag_query, False
+
+
+def _resolve_contextual_ids(
+    question: str,
+    task_id: int | None,
+    job_id: int | None,
+    history: list[Message],
+) -> tuple[int | None, int | None]:
+    """Resolve task/job IDs for contextual follow-up questions.
+
+    When the current question has no ID of its own but refers back to a
+    prior result, scan history for the most recent ID and return it.
+
+    Args:
+        question: The current user question.
+        task_id: ID already extracted from the question, or None.
+        job_id: ID already extracted from the question, or None.
+        history: Prior conversation turns.
+
+    Returns:
+        ``(task_id, job_id)`` — may be updated from history.
+    """
+    if task_id is not None or job_id is not None or not history:
+        return task_id, job_id
+    if _is_contextual_followup(question):
+        return _extract_id_from_history(history)
+    if _is_implicit_contextual_followup(question):
+        hist_task, hist_job = _extract_id_from_history(history)
+        if hist_task is not None or hist_job is not None:
+            return hist_task, hist_job
+    return task_id, job_id
 
 
 class BambooAnswerTool:
@@ -477,11 +747,6 @@ class BambooAnswerTool:
     ) -> list[MCPContent]:
         """Route the question to the appropriate synthesis path.
 
-        The ``bypass_routing`` path passes the question directly to the LLM
-        without any tool calls.  All other questions are routed through the
-        planner with ``execute=True``, which selects tools, executes them, and
-        synthesises a grounded answer.
-
         Args:
             question: Extracted or derived user question string.
             history: Prior conversation turns (user/assistant pairs) excluding
@@ -495,65 +760,34 @@ class BambooAnswerTool:
             List[MCPContent]: One-element MCP text content list.
         """
         if bypass_routing:
-            msgs: list[Message] = []
-            if history:
-                msgs.extend(history)
-            msgs.append({"role": "user", "content": question})
-            delegated = await bamboo_llm_answer_tool.call(
-                {"messages": msgs} if msgs else {"question": question}
-            )
-            if delegated and isinstance(delegated[0], dict):
-                return text_content(str(delegated[0].get("text", "")))
-            return text_content(str(delegated))
+            return await _bypass_response(question, history)
 
-        # Content-free follow-ups ("Tell me more", "Elaborate") are trivially
-        # on-topic when history is present — skip the LLM guard to save ~400ms
-        # and substitute the last real question as the RAG query.
-        rag_query = question
-        if history and _is_content_free_followup(question):
-            prior = _last_user_question(history)
-            if prior:
-                rag_query = prior
-            # Skip the guard entirely — a follow-up in an active conversation
-            # cannot be off-topic by definition.
-            async with span(EVENT_GUARD, tool="topic_guard") as _guard_span:
-                _guard_span.set(allowed=True, reason="followup_allow", llm_used=False)
-        else:
-            # Topic guard must run before any tool or LLM call.
-            async with span(EVENT_GUARD, tool="topic_guard") as _guard_span:
-                guard = await check_topic(question)
-                _guard_span.set(
-                    allowed=guard.allowed,
-                    reason=guard.reason,
-                    llm_used=guard.llm_used,
-                )
-            if not guard.allowed:
-                return text_content(guard.rejection_message)
+        # Social intercept — zero LLM cost for greetings and acknowledgements.
+        if _is_greeting(question):
+            return text_content(_GREETING_RESPONSE)
+        if _is_ack(question):
+            return text_content(_ACK_RESPONSE)
 
-        # Extract structured hints — these drive fast-path routing and also
-        # improve accuracy when the LLM planner is needed as a fallback.
+        # Topic guard + content-free followup reformulation.
+        rag_query, blocked = await _run_topic_guard(question, history)
+        if blocked:
+            return text_content(rag_query)  # rag_query holds the rejection message
+
+        # Extract IDs, falling back to history for contextual follow-ups.
         task_id = _extract_task_id(question)
         job_id = _extract_job_id(question)
+        task_id, job_id = _resolve_contextual_ids(question, task_id, job_id, history)
 
-        # --- Fast-path: build the plan deterministically for unambiguous cases ---
-        # This eliminates the planner LLM call (~6-7s) for the most common routes
-        # and avoids the 30s TUI timeout on follow-up questions.
-        # For content-free follow-ups, rag_query holds the last real question
-        # so retrieval targets meaningful content rather than "tell me more".
+        # Fast-path: deterministic routing for unambiguous cases.
         fast_plan = _build_deterministic_plan(rag_query, task_id, job_id)
         if fast_plan is not None:
-            # Pass original_question only when it differs from rag_query — i.e.
-            # when a content-free follow-up was reformulated. This signals
-            # _build_synthesis_prompt to use expansion framing instead of
-            # answer framing. On first-turn questions rag_query == question
-            # so original_question is None and normal framing is used.
             original_question = question if rag_query != question else None
             return await execute_plan(
                 fast_plan, rag_query, history,
                 original_question=original_question,
             )
 
-        # --- LLM planner fallback for ambiguous or multi-step questions ---
+        # LLM planner fallback for ambiguous or multi-step questions.
         hints: dict[str, Any] = {}
         if task_id:
             hints["task_id"] = task_id
@@ -567,10 +801,7 @@ class BambooAnswerTool:
         plan_args: dict[str, Any] = {
             "question": question,
             "execute": True,
-            "messages": [
-                *history,
-                {"role": "user", "content": question},
-            ],
+            "messages": [*history, {"role": "user", "content": question}],
         }
         if hints:
             plan_args["hints"] = hints

@@ -41,6 +41,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical
+from textual.events import Key
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
 from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig
@@ -319,6 +320,10 @@ class BambooTui(App):
         self._mcp_ready: bool = False
         self._last_raw_result: Any = None  # Most recent raw MCP tool result for /json
         self._last_task_id: Optional[int] = None  # Most recent task ID queried
+        self._last_job_id: Optional[int] = None   # Most recent job ID queried
+        self._command_history: List[str] = []     # Input history for arrow-up/down recall
+        self._cmd_history_pos: int = -1           # Current position in _command_history (-1 = not browsing)
+        self._thinking_task: Optional[Any] = None  # Textual Timer for animated thinking indicator
         self._last_spans: List[Dict[str, Any]] = []  # Trace spans for last request
         self._trace_file: str = os.path.join(
             tempfile.gettempdir(), f"bamboo_trace_{os.getpid()}.jsonl"
@@ -407,8 +412,24 @@ class BambooTui(App):
             self._render_banner()
 
             self._mcp_ready = True
+            # Fetch LLM info from the server-side health tool — calling
+            # get_llm_info() directly here fails because the LLM selector
+            # is not yet initialised at this point in the startup sequence.
+            llm_info = ""
+            try:
+                health_res = await self._to_thread(
+                    self.mcp.call_tool, "bamboo_health", {}
+                )
+                health_text = _extract_text(health_res)
+                for line in health_text.splitlines():
+                    if line.strip().startswith("- llm_info:"):
+                        llm_info = line.split(":", 1)[1].strip()
+                        break
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            llm_suffix = f"\n[LLM selected] {llm_info}" if llm_info and llm_info != "not configured" else ""
             self._write_system(
-                f"Connected via {self.cfg.transport}. Answer tool: {self.answer_tool or 'UNKNOWN'}"
+                f"Connected via {self.cfg.transport}. Answer tool: {self.answer_tool or 'UNKNOWN'}.{llm_suffix}"
             )
 
             await self._shutdown_event.wait()
@@ -520,11 +541,16 @@ class BambooTui(App):
             self.input_widget.focus()
 
     async def action_clear(self) -> None:
-        """Clear the transcript and reset conversation history."""
+        """Clear the transcript, conversation history, and HTTP response cache."""
         if self.transcript:
             self.transcript.clear()
         self._history = []
-        self._write_system("Transcript cleared and context memory reset.")
+        try:
+            from askpanda_atlas._cache import clear as _cache_clear  # type: ignore[import]
+            _cache_clear()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        self._write_system("Transcript cleared, context memory reset, and HTTP cache flushed.")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle Enter on the input field.
@@ -539,6 +565,11 @@ class BambooTui(App):
         if not text:
             self.action_focus_input()
             return
+
+        # Append to command history, avoiding consecutive duplicates.
+        if not self._command_history or self._command_history[-1] != text:
+            self._command_history.append(text)
+        self._cmd_history_pos = -1  # Reset browsing position after submit
 
         if text.startswith("/"):
             await self._handle_command(text)
@@ -612,6 +643,52 @@ class BambooTui(App):
             )
         )
 
+    async def on_key(self, event: Key) -> None:
+        """Handle arrow-up/down for command history recall in the input field.
+
+        Arrow-up navigates backwards through :attr:`_command_history`;
+        arrow-down navigates forwards.  Any other key resets the browsing
+        position so the next up-press always starts from the most recent entry.
+
+        Args:
+            event: The key event from Textual.
+        """
+        if not self.input_widget or not self.input_widget.has_focus:
+            return
+
+        if not self._command_history:
+            return
+
+        if event.key == "up":
+            event.stop()
+            event.prevent_default()
+            if self._cmd_history_pos == -1:
+                # Start browsing from the most recent entry.
+                self._cmd_history_pos = len(self._command_history) - 1
+            elif self._cmd_history_pos > 0:
+                self._cmd_history_pos -= 1
+            self.input_widget.value = self._command_history[self._cmd_history_pos]
+            # Move cursor to end of the restored text.
+            self.input_widget.cursor_position = len(self.input_widget.value)
+
+        elif event.key == "down":
+            event.stop()
+            event.prevent_default()
+            if self._cmd_history_pos == -1:
+                return  # Already at the empty prompt — nothing to do.
+            if self._cmd_history_pos < len(self._command_history) - 1:
+                self._cmd_history_pos += 1
+                self.input_widget.value = self._command_history[self._cmd_history_pos]
+            else:
+                # Past the end — clear the input and stop browsing.
+                self._cmd_history_pos = -1
+                self.input_widget.value = ""
+            self.input_widget.cursor_position = len(self.input_widget.value)
+
+        else:
+            # Any other key resets history browsing.
+            self._cmd_history_pos = -1
+
     async def _handle_question(self, question: str) -> None:
         """Send a question to the answer tool and render the response.
 
@@ -645,12 +722,18 @@ class BambooTui(App):
             "include_raw": self.debug_mode,
         }
 
-        # Store task ID if present so /json can fetch the raw payload directly.
+        # Store task/job IDs if present so /json and /inspect can access them.
         try:
             import re as _re
             m = _re.search(r"\btask[:#/\-\s]+(\d{4,12})\b", question, _re.IGNORECASE)
             if m:
                 self._last_task_id = int(m.group(1))
+            m_job = _re.search(
+                r"\b(?:job|pandaid|panda[\s_-]?id)[:#/\-\s]+(\d{4,12})\b",
+                question, _re.IGNORECASE,
+            )
+            if m_job:
+                self._last_job_id = int(m_job.group(1))
         except Exception:  # pylint: disable=broad-exception-caught
             pass
 
@@ -743,7 +826,9 @@ class BambooTui(App):
         if cmd == "/json":
             await self._handle_json_command()
             return
-        if cmd == "/history":
+        if cmd == "/inspect":
+            await self._handle_inspect_command()
+            return
             self._handle_history_command()
             return
         if cmd == "/plugin":
@@ -765,12 +850,13 @@ class BambooTui(App):
             "  /tools                List tools exposed by the MCP server\n"
             "  /task <id>             Shorthand for: status of task <id>\n"
             "  /job <id>              Shorthand for: analyse failure of job <id>\n"
-            "  /json                 Show full raw server JSON for last response\n"
+            "  /json                 Show verbatim BigPanDA API response (raw server JSON)\n"
+            "  /inspect              Show structured evidence dict (job counts, sites, errors)\n"
             "  /tracing              Show timing + trace spans for last request\n"
             "  /history              Show turns currently held in context memory\n"
             "  /plugin <id>          Switch plugin (affects banner tool name)\n"
             "  /debug on|off         Toggle debug (shows tool calls + raw results)\n"
-            "  /clear                Clear transcript and reset context memory\n"
+            "  /clear                Clear transcript, context memory, and HTTP cache\n"
             "  /exit, /quit          Exit the app\n"
             "\n"
             "Tip: Use PageUp/PageDown to scroll. To copy text, hold Option (macOS) or\n"
@@ -1033,32 +1119,51 @@ class BambooTui(App):
         self.action_focus_input()
 
     def _write_thinking(self) -> bool:
-        """Show the thinking indicator below the transcript.
+        """Start the animated thinking indicator below the transcript.
 
-        Uses a dedicated #thinking Static widget that is toggled via a
-        CSS class rather than writing into the RichLog (which only accepts
-        Rich renderables, not Textual widgets).
+        Uses :meth:`set_interval` (Textual's own timer mechanism) to cycle
+        through ``Thinking.`` → ``Thinking..`` → ``Thinking...`` once per
+        second, with the current wall-clock time updated on each frame.
+
+        :meth:`set_interval` integrates with Textual's event loop directly,
+        avoiding the timing issues that ``asyncio.ensure_future`` + ``asyncio.sleep``
+        can cause when the loop is shared with blocking worker threads.
 
         Returns:
-            True if the indicator was shown, False if unavailable.
+            True if the indicator was started, False if unavailable.
         """
         if not self.thinking_widget:
             return False
-        self.thinking_widget.update(
-            Text(f"{_now()}  Thinking…", style="dim italic")
-        )
         self.thinking_widget.add_class("active")
+
+        frames = ["Thinking.", "Thinking..", "Thinking..."]
+        counter = [0]  # mutable cell so the closure can increment it
+
+        def _tick() -> None:
+            import datetime as _dt
+            now = _dt.datetime.now().strftime("%H:%M:%S")
+            if self.thinking_widget:
+                self.thinking_widget.update(
+                    Text(f"{now}  {frames[counter[0] % len(frames)]}", style="dim italic")
+                )
+            counter[0] += 1
+
+        _tick()  # Show the first frame immediately; timer fires subsequent ones
+        self._thinking_task = self.set_interval(1.0, _tick)
         return True
 
     def _replace_thinking(self, indicator: bool, answer: Optional[str]) -> None:
-        """Hide the thinking indicator and optionally write the final answer.
+        """Cancel the animated thinking indicator and optionally write the answer.
 
         Args:
-            indicator: Value returned by _write_thinking (unused beyond
-                being a signal that the indicator was shown).
+            indicator: Value returned by _write_thinking (True if it was
+                started).
             answer: The assistant response text (Markdown), or None to
                 simply hide the indicator without writing a response.
         """
+        if self._thinking_task is not None:
+            self._thinking_task.stop()
+            self._thinking_task = None
         if self.thinking_widget:
             self.thinking_widget.remove_class("active")
             self.thinking_widget.update("")
@@ -1113,47 +1218,74 @@ class BambooTui(App):
         self._write_panel(Markdown(body), title=f"{_now()}  tool", border_style="cyan")
 
     async def _handle_json_command(self) -> None:
-        """Fetch and display the raw BigPanDA JSON for the last queried task.
+        """Display the verbatim BigPanDA API response for the last task or job.
 
-        Calls ``panda_task_status`` directly (bypassing the LLM) so the output
-        is the unmodified server payload. Falls back to parsing the last MCP
-        result if no task ID is known.
+        Calls ``bamboo_last_evidence`` with ``mode='raw'`` to retrieve the
+        response from the server-side evidence store — no fresh HTTP request.
+        Shows the full BigPanDA payload as returned by the API before any
+        summarisation.  Use ``/inspect`` for the compact evidence dict instead.
         """
         if not self._mcp_ready:
             self._write_system("Not connected yet.")
             return
-
-        if self._last_task_id is not None:
-            # Fetch directly from the task status tool — no LLM involved.
-            try:
-                res = await self._to_thread(
-                    self.mcp.call_tool,
-                    "panda_task_status",
-                    {"task_id": self._last_task_id, "include_jobs": True},
-                )
-                payload = self._extract_bigpanda_payload(res)
-                if payload is not None:
-                    self._write_panel(
-                        Markdown(f"```json\n{_pretty(payload)}\n```"),
-                        title=f"{_now()}  raw JSON — task {self._last_task_id}",
-                        border_style="cyan",
-                    )
-                    return
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                self._write_error(f"Could not fetch raw JSON: {exc}")
+        try:
+            res = await self._to_thread(
+                self.mcp.call_tool, "bamboo_last_evidence", {"mode": "raw"},
+            )
+            text = _extract_text(res)
+            if not text:
+                self._write_system("No evidence stored yet — ask about a task or job first.")
                 return
-
-        if self._last_raw_result is not None:
-            payload = self._extract_bigpanda_payload(self._last_raw_result)
-            if payload is not None:
-                self._write_panel(
-                    Markdown(f"```json\n{_pretty(payload)}\n```"),
-                    title=f"{_now()}  raw JSON",
-                    border_style="cyan",
-                )
+            parsed = json.loads(text)
+            if "error" in parsed:
+                self._write_system(parsed["error"])
                 return
+            payload = parsed.get("evidence", parsed)
+            tool = parsed.get("tool", "")
+            title = f"{_now()}  raw JSON — {tool}" if tool else f"{_now()}  raw JSON"
+            self._write_panel(
+                Markdown(f"```json\n{_pretty(payload)}\n```"),
+                title=title,
+                border_style="yellow",
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self._write_error(f"Could not fetch raw JSON: {exc}")
 
-        self._write_system("No task result yet — ask about a task first.")
+    async def _handle_inspect_command(self) -> None:
+        """Dump the structured evidence dict for the last task or job query.
+
+        Calls ``bamboo_last_evidence`` with ``mode='evidence'`` to retrieve
+        the compact evidence dict from the server-side store — the same data
+        that was sent to the LLM: job counts, site breakdown, error tallies,
+        sample job records, and the PanDA ID list.  No HTTP request is made.
+
+        Use ``/json`` for the verbatim BigPanDA API response instead.
+        """
+        if not self._mcp_ready:
+            self._write_system("Not connected yet.")
+            return
+        try:
+            res = await self._to_thread(
+                self.mcp.call_tool, "bamboo_last_evidence", {"mode": "evidence"},
+            )
+            text = _extract_text(res)
+            if not text:
+                self._write_system("No evidence stored yet — ask about a task or job first.")
+                return
+            parsed = json.loads(text)
+            if "error" in parsed:
+                self._write_system(parsed["error"])
+                return
+            evidence = parsed.get("evidence", parsed)
+            tool = parsed.get("tool", "")
+            title = f"{_now()}  evidence — {tool}" if tool else f"{_now()}  evidence"
+            self._write_panel(
+                Markdown(f"```json\n{_pretty(evidence)}\n```"),
+                title=title,
+                border_style="cyan",
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self._write_error(f"Could not fetch evidence: {exc}")
 
     def _write_raw_json(self, res: Any) -> None:
         """Write the full raw BigPanDA JSON for the last tool result.

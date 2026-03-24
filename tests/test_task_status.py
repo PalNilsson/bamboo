@@ -1,92 +1,235 @@
+"""Tests for the panda_task_status tool (via the askpanda_atlas shim).
+
+All tests go through ``ts_mod.panda_task_status_tool`` — the same object the
+rest of the system uses — and mock ``askpanda_atlas._cache.cached_fetch_jsonish``
+at the HTTP boundary, matching the pattern in ``test_log_analysis.py``.
+
+All mocks return the 4-tuple ``(status_code, content_type, body_text,
+parsed_json_or_none)`` that matches the ``cached_fetch_jsonish`` signature.
+"""
+from __future__ import annotations
+
 import asyncio
 import json
+from typing import Any
 
-import json as _json
+import pytest
+
 from askpanda_atlas import task_status as ts_mod
 
 
-def _unpack(result):
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _unpack(result: list[Any]) -> dict[str, Any]:
     """Deserialise the JSON-wrapped MCPContent returned by the tool.
 
-    Tools now return list[MCPContent] with a JSON-encoded evidence dict
-    in the text field.  This helper unwraps that for test assertions.
-
     Args:
-        result: Return value of tool.call().
+        result: Return value of ``panda_task_status_tool.call()``.
 
     Returns:
-        Deserialised dict with ``evidence`` and ``text`` keys.
+        Deserialised dict with ``"evidence"`` key (and optionally ``"text"``).
     """
-    return _json.loads(result[0]["text"])
+    return json.loads(result[0]["text"])
 
 
-class DummyResp:
-    def __init__(self, status_code=200, headers=None, text="{}", json_data=None):
-        self.status_code = status_code
-        self.headers = headers or {"content-type": "application/json"}
-        self._text = text
-        self._json = json_data
+def _ok_response(raw: dict[str, Any]) -> tuple[int, str, str, dict[str, Any]]:
+    """Wrap a raw dict in the 4-tuple that ``fetch_jsonish`` returns on success.
 
-    @property
-    def text(self):
-        return self._text
+    Args:
+        raw: Parsed JSON dict to return as the response body.
 
-    def json(self):
-        if self._json is not None:
-            return self._json
-        raise ValueError("No JSON payload")
+    Returns:
+        ``(200, "application/json", json_text, raw)`` tuple.
+    """
+    return (200, "application/json", json.dumps(raw), raw)
 
 
-def test_task_status_success_json(monkeypatch):
-    sample = {
-        "task": {"jeditaskid": 1234, "status": "finished"},
-        "datasets": [
-            {"status": "finished", "nfilesfailed": 0, "nfilesfinished": 10, "datasetname": "d1"},
+def _make_raw_task(
+    task_id: int = 1234,
+    status: str = "finished",
+    n_failed: int = 0,
+    n_finished: int = 5,
+) -> dict[str, Any]:
+    """Return a minimal BigPanDA ``/jobs/`` response dict for testing.
+
+    Args:
+        task_id: JEDI task identifier embedded in each job record.
+        status: Dominant job status (used for selectionsummary).
+        n_failed: Number of failed jobs to generate.
+        n_finished: Number of finished jobs to generate.
+
+    Returns:
+        Minimal raw task dict matching the ``/jobs/?jeditaskid=`` endpoint shape.
+    """
+    jobs: list[dict[str, Any]] = []
+    for i in range(n_failed):
+        jobs.append({
+            "pandaid": 1000 + i,
+            "jobstatus": "failed",
+            "computingsite": "AGLT2",
+            "piloterrorcode": 1008,
+            "piloterrordiag": "stage-in timeout",
+            "attemptnr": 1,
+            "jeditaskid": task_id,
+            "reqid": 99,
+            "processingtype": "managed",
+        })
+    for i in range(n_finished):
+        jobs.append({
+            "pandaid": 2000 + i,
+            "jobstatus": "finished",
+            "computingsite": "BNL",
+            "piloterrorcode": 0,
+            "piloterrordiag": None,
+            "attemptnr": 1,
+            "jeditaskid": task_id,
+            "reqid": 99,
+            "processingtype": "managed",
+        })
+    return {
+        "jobs": jobs,
+        "selectionsummary": [
+            {
+                "field": "taskname",
+                "list": [{"value": f"mc21_task_{task_id}", "count": 1}],
+            },
+            {
+                "field": "jobstatus",
+                "list": [{"value": status, "count": n_failed + n_finished}],
+            },
         ],
+        "errsByCount": {"1008": n_failed} if n_failed else {},
     }
 
-    def fake_get(url, timeout=30, headers=None, allow_redirects=True):  # pylint: disable=unused-argument
-        return DummyResp(status_code=200, json_data=sample, text=json.dumps(sample))
 
-    monkeypatch.setattr("requests.get", fake_get)
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
-    tool = ts_mod.panda_task_status_tool
-    res = asyncio.run(tool.call({"task_id": 1234, "query": "status?"}))
+
+def test_task_status_success_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Successful fetch returns evidence with task_id and job counts."""
+    raw = _make_raw_task(task_id=1234, n_failed=0, n_finished=5)
+    monkeypatch.setattr(
+        "askpanda_atlas._cache.cached_fetch_jsonish",
+        lambda url, timeout=30: _ok_response(raw),
+    )
+    monkeypatch.setenv("PANDA_BASE_URL", "https://bigpanda.cern.ch")
+
+    res = asyncio.run(ts_mod.panda_task_status_tool.call({"task_id": 1234, "query": "status?"}))
 
     unpacked = _unpack(res)
     assert "evidence" in unpacked
     ev = unpacked["evidence"]
     assert ev["task_id"] == 1234
-    assert ev.get("status") == "finished"
-    assert "monitor_url" in ev
+    assert ev["total_jobs"] == 5
+    assert ev["jobs_by_status"].get("finished") == 5
 
 
-def test_task_status_non_json(monkeypatch):
-    html = "<html><body>error</body></html>"
+def test_task_status_with_failed_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failed jobs appear in jobs_by_status and failed_jobs_sample."""
+    raw = _make_raw_task(task_id=5678, n_failed=3, n_finished=2)
+    monkeypatch.setattr(
+        "askpanda_atlas._cache.cached_fetch_jsonish",
+        lambda url, timeout=30: _ok_response(raw),
+    )
 
-    def fake_get(url, timeout=30, headers=None, allow_redirects=True):  # pylint: disable=unused-argument
-        return DummyResp(status_code=200, headers={"content-type": "text/html"}, text=html, json_data=None)
+    res = asyncio.run(ts_mod.panda_task_status_tool.call({"task_id": 5678, "query": "why did jobs fail?"}))
 
-    monkeypatch.setattr("requests.get", fake_get)
-
-    tool = ts_mod.panda_task_status_tool
-    res = asyncio.run(tool.call({"task_id": 9999, "query": "status?"}))
-
-    ev = _unpack(res).get("evidence", {})
-    assert ev.get("http_status") == 200
-    assert ev.get("content_type", "").startswith("text/html")
-    assert "response_snippet" in ev
+    ev = _unpack(res)["evidence"]
+    assert ev["jobs_by_status"]["failed"] == 3
+    assert ev["jobs_by_status"]["finished"] == 2
+    assert len(ev["failed_jobs_sample"]) == 3
+    assert ev["jobs_by_piloterrorcode"].get("1008") == 3
 
 
-def test_task_status_404(monkeypatch):
-    def fake_get(url, timeout=30, headers=None, allow_redirects=True):  # pylint: disable=unused-argument
-        return DummyResp(status_code=404, headers={"content-type": "text/html"}, text="", json_data=None)
+def test_task_status_non_json_response_returns_error_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-JSON (HTML) response from BigPanDA returns error evidence."""
+    monkeypatch.setattr(
+        "askpanda_atlas._cache.cached_fetch_jsonish",
+        lambda url, timeout=30: (200, "text/html", "<html>Maintenance</html>", None),
+    )
 
-    monkeypatch.setattr("requests.get", fake_get)
+    res = asyncio.run(ts_mod.panda_task_status_tool.call({"task_id": 9999, "query": "status?"}))
 
-    tool = ts_mod.panda_task_status_tool
-    res = asyncio.run(tool.call({"task_id": 1111, "query": "status?"}))
+    payload = _unpack(res)
+    ev = payload.get("evidence", {})
+    assert "error" in ev or "text" in payload
 
-    ev = _unpack(res).get("evidence", {})
-    assert ev.get("http_status") == 404
-    assert ev.get("not_found") is True
+
+def test_task_status_http_error_returns_error_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP failure (RuntimeError) returns error evidence, never raises."""
+    def _fail(url: str, timeout: int = 30) -> None:
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("askpanda_atlas._cache.cached_fetch_jsonish", _fail)
+
+    res = asyncio.run(ts_mod.panda_task_status_tool.call({"task_id": 9999, "query": "status?"}))
+
+    payload = _unpack(res)
+    ev = payload.get("evidence", {})
+    assert "error" in ev or "text" in payload
+
+
+def test_task_status_missing_task_id() -> None:
+    """Missing task_id returns an error evidence dict without hitting HTTP."""
+    res = asyncio.run(ts_mod.panda_task_status_tool.call({}))
+
+    ev = _unpack(res)["evidence"]
+    assert "error" in ev
+    assert "task_id" in ev["error"]
+
+
+def test_task_status_bad_task_id_type() -> None:
+    """Non-integer task_id returns an error evidence dict."""
+    res = asyncio.run(ts_mod.panda_task_status_tool.call({"task_id": "not-an-int"}))
+
+    ev = _unpack(res)["evidence"]
+    assert "error" in ev
+    assert "integer" in ev["error"]
+
+
+def test_task_status_url_uses_jobs_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The /jobs/ endpoint is called with the correct jeditaskid parameter."""
+    raw = _make_raw_task(task_id=42)
+    captured: list[str] = []
+
+    def _capture(url: str, timeout: int = 30) -> tuple[int, str, str, dict[str, Any]]:
+        captured.append(url)
+        return _ok_response(raw)
+
+    monkeypatch.setattr("askpanda_atlas._cache.cached_fetch_jsonish", _capture)
+    monkeypatch.setenv("PANDA_BASE_URL", "https://bigpanda.cern.ch")
+
+    asyncio.run(ts_mod.panda_task_status_tool.call({"task_id": 42}))
+
+    assert len(captured) == 1
+    assert "/jobs/" in captured[0]
+    assert "jeditaskid=42" in captured[0]
+    assert "json" in captured[0]
+
+
+def test_task_status_result_is_json_serialisable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The full tool result can be round-tripped through json.dumps."""
+    raw = _make_raw_task(task_id=99, n_failed=1, n_finished=4)
+    monkeypatch.setattr(
+        "askpanda_atlas._cache.cached_fetch_jsonish",
+        lambda url, timeout=30: _ok_response(raw),
+    )
+
+    res = asyncio.run(ts_mod.panda_task_status_tool.call({"task_id": 99}))
+
+    payload = json.loads(res[0]["text"])
+    assert isinstance(payload, dict)
+    assert "evidence" in payload

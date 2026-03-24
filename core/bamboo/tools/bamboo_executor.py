@@ -30,6 +30,18 @@ from bamboo.tools.planner import Plan
 from bamboo.tracing import EVENT_PLAN, EVENT_RETRIEVAL, EVENT_SYNTHESIS, span
 
 # ---------------------------------------------------------------------------
+# In-process evidence store
+#
+# Populated by execute_plan() after every successful tool call so that the
+# TUI /json and /inspect commands can retrieve the last evidence dict without
+# re-fetching from BigPanDA.  Keys are tool names; values are the unpacked
+# evidence dicts.  A separate "last_tool" key tracks which tool ran most
+# recently so callers can retrieve the most relevant entry.
+# ---------------------------------------------------------------------------
+
+_last_evidence_store: dict[str, Any] = {}
+
+# ---------------------------------------------------------------------------
 # Synthesis system prompt constants (moved from bamboo_answer.py)
 # ---------------------------------------------------------------------------
 
@@ -557,7 +569,13 @@ async def execute_plan(
         # Unpack JSON evidence; fall back to raw text if unpacking yields nothing.
         unpacked = unpack_tool_result(raw_result)
         if unpacked:
-            evidence_parts.append(f"[{tool_name}]\n{_compact_json(unpacked)}")
+            # Store the full evidence (including raw_payload) for /json and /inspect.
+            _last_evidence_store[tool_name] = unpacked
+            _last_evidence_store["last_tool"] = tool_name
+            # Strip raw_payload before synthesis — it can be very large and the
+            # LLM should only see the compact structured evidence fields.
+            llm_evidence = {k: v for k, v in unpacked.items() if k != "raw_payload"}
+            evidence_parts.append(f"[{tool_name}]\n{_compact_json(llm_evidence)}")
         else:
             raw_text = raw_result[0].get("text", "") if raw_result else ""
             if raw_text:
@@ -613,4 +631,109 @@ __all__ = [
     "_SYSTEM_RAG",
     "_SYSTEM_RAG_NO_CONTEXT",
     "_SYSTEM_GENERIC",
+    "bamboo_last_evidence_tool",
 ]
+
+
+class BambooLastEvidenceTool:
+    """MCP tool that returns the evidence dict from the most recent tool call.
+
+    ``execute_plan`` stores the unpacked evidence from every tool call in
+    ``_last_evidence_store``.  This tool exposes that store so the TUI
+    ``/json`` and ``/inspect`` commands can retrieve it without making a
+    fresh HTTP request to BigPanDA.
+
+    Two modes (controlled by the ``mode`` argument):
+
+    ``"evidence"`` (default)
+        The compact structured evidence dict — job counts, site breakdown,
+        error tallies, sample job records.  This is what was sent to the LLM.
+
+    ``"raw"``
+        The verbatim BigPanDA API response stored under
+        ``evidence["raw_payload"]``, if present.  Falls back to the full
+        evidence dict if ``raw_payload`` is absent.
+    """
+
+    @staticmethod
+    def get_definition() -> dict[str, Any]:
+        """Return the MCP tool definition for ``bamboo_last_evidence``.
+
+        Returns:
+            Tool definition dict compatible with MCP discovery.
+        """
+        return {
+            "name": "bamboo_last_evidence",
+            "description": (
+                "Return the evidence dict from the most recent panda_task_status "
+                "or panda_log_analysis call.  Use mode='evidence' (default) for "
+                "the compact structured summary, or mode='raw' for the verbatim "
+                "BigPanDA API response."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["evidence", "raw"],
+                        "description": (
+                            "'evidence' returns the compact LLM-facing evidence dict; "
+                            "'raw' returns the verbatim BigPanDA API payload."
+                        ),
+                    },
+                    "tool": {
+                        "type": "string",
+                        "description": (
+                            "Optional tool name to retrieve evidence for "
+                            "(e.g. 'panda_task_status').  Defaults to the "
+                            "most recently called tool."
+                        ),
+                    },
+                },
+                "additionalProperties": False,
+            },
+        }
+
+    async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:
+        """Return stored evidence from the last tool execution.
+
+        Args:
+            arguments: Dict with optional ``"mode"`` (``"evidence"`` or
+                ``"raw"``) and optional ``"tool"`` name.
+
+        Returns:
+            One-element MCP content list with the JSON-serialised evidence,
+            or an error message if no evidence is stored yet.
+        """
+        mode: str = str(arguments.get("mode") or "evidence")
+        requested_tool: str | None = arguments.get("tool") or None
+
+        if not _last_evidence_store:
+            return text_content(json.dumps({
+                "error": "No evidence stored yet — ask about a task or job first."
+            }))
+
+        tool_name = requested_tool or _last_evidence_store.get("last_tool")
+        evidence = _last_evidence_store.get(str(tool_name), {}) if tool_name else {}
+
+        if not evidence:
+            return text_content(json.dumps({
+                "error": f"No evidence stored for tool {tool_name!r}.",
+                "available_tools": [k for k in _last_evidence_store if k != "last_tool"],
+            }))
+
+        if mode == "raw":
+            payload = evidence.get("raw_payload")
+            result = payload if isinstance(payload, dict) else evidence
+        else:
+            # Return evidence without the raw_payload to keep it compact.
+            result = {k: v for k, v in evidence.items() if k != "raw_payload"}
+
+        return text_content(json.dumps({
+            "tool": tool_name,
+            "mode": mode,
+            "evidence": result,
+        }))
+
+
+bamboo_last_evidence_tool = BambooLastEvidenceTool()

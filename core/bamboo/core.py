@@ -53,6 +53,7 @@ from bamboo.tools.pilot_monitor import panda_pilot_status_tool
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.bamboo_answer import bamboo_answer_tool
 from bamboo.tools.planner import bamboo_plan_tool
+from bamboo.tools.bamboo_executor import bamboo_last_evidence_tool
 from bamboo.tools.loader import list_tool_entry_points, find_tool_by_name
 from bamboo.tracing import EVENT_TOOL_CALL, span
 from bamboo.prompts.templates import (
@@ -65,6 +66,7 @@ TOOLS = {
     "bamboo_llm_answer": bamboo_llm_answer_tool,
     "bamboo_answer": bamboo_answer_tool,
     "bamboo_plan": bamboo_plan_tool,
+    "bamboo_last_evidence": bamboo_last_evidence_tool,
     "panda_doc_search": panda_doc_search_tool,
     "panda_doc_bm25": panda_doc_bm25_tool,
     "panda_queue_info": panda_queue_info_tool,
