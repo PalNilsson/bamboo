@@ -69,6 +69,9 @@ entirely — they are self-evidently on-topic and the guard LLM call would add
 that pronouns like `"how many of those failed?"` (which match `"failed"` but
 refer to a task in history) still route to `panda_task_status`.
 
+See [`docs/jobs-database.md`](jobs-database.md) for the full schema, example
+queries, guard rules, and configuration.
+
 **LLM planner fallback** — if the deterministic step cannot produce a plan
 (currently reserved for future multi-step questions), `bamboo_plan` is called.
 This uses the default LLM to select tools from a curated catalog (internal

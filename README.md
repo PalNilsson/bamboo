@@ -86,12 +86,14 @@ Type any question and press Enter.
 |---|---|
 | `/help` | Show all commands |
 | `/task <id>` | Shorthand for "summarise task \<id\>" |
+| `/job <id>` | Shorthand for "analyse failure of job \<id\>" |
 | `/tracing` | Show timing and trace spans for the last request |
-| `/json` | Show raw BigPanDA JSON for the last task query |
+| `/json` | Show raw BigPanDA JSON for the last query |
+| `/inspect` | Show compact evidence dict (what the LLM saw) for the last query |
 | `/history` | Show turns currently held in context memory |
 | `/debug on\|off` | Toggle verbose tool call output |
 | `/tools` | List tools registered on the server |
-| `/clear` | Clear transcript and reset context memory |
+| `/clear` | Clear transcript, context memory, and HTTP cache |
 | `/exit` | Quit |
 
 `PageUp`/`PageDown` to scroll · `Ctrl+Q` to quit ·
@@ -132,6 +134,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | [`docs/mcp.md`](docs/mcp.md) | MCP protocol, tool contracts, LLM roles, orchestration |
 | [`docs/interfaces.md`](docs/interfaces.md) | TUI, Streamlit UI, HTTP transport, context memory |
 | [`docs/plugins.md`](docs/plugins.md) | Writing and registering plugins |
+| [`docs/jobs-database.md`](docs/jobs-database.md) | Live PanDA jobs DB queries — schema, examples, guard rules, routing |
 | [`docs/rag.md`](docs/rag.md) | RAG pipeline (ChromaDB + BM25) |
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |

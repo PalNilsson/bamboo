@@ -167,7 +167,7 @@ All `bamboo.tools.base` imports are deferred inside `call()` — never at module
 
 #### Jobs Query (`jobs_query_impl.py`, `jobs_query_schema.py`)
 
-NL→SQL tool that queries the local ingestion DuckDB file written by the `askpanda-ingestion-agent`. See `docs/jobs-database.md` for full documentation.
+NL→SQL tool that queries the local ingestion DuckDB file written by the `askpanda-ingestion-agent`. See [`docs/jobs-database.md`](../docs/jobs-database.md) for full documentation.
 
 Pipeline: schema context (cached, 1 h TTL) → LLM SQL generation (temperature 0.0, max 512 tokens) → fence-strip → cannot-answer detection → AST guard (`sqlglot`, DuckDB dialect) → synchronous DuckDB execution → evidence dict.
 
