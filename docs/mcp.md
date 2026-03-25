@@ -49,18 +49,28 @@ mechanisms, tried in order:
 
 **Deterministic routing** — `_build_deterministic_plan()` inspects the
 question for a task ID, a job ID, or failure-analysis keywords using regex
-patterns.  This produces a `Plan` object covering five cases:
+patterns.  This produces a `Plan` object covering six cases:
 
 | Question contains | Tool called | Route |
 |---|---|---|
 | job ID + failure keywords (analyse, why, fail, log…) | `panda_log_analysis` | `FAST_PATH` |
 | job ID (no task ID) | `panda_job_status` | `FAST_PATH` |
 | task ID | `panda_task_status` | `FAST_PATH` |
+| pilot/Harvester signals, no IDs | `panda_harvester_workers` | `FAST_PATH` |
 | jobs DB signals, no IDs | `panda_jobs_query` | `FAST_PATH` |
 | neither | `panda_doc_search` + `panda_doc_bm25` | `RETRIEVE` |
 
 **No LLM is involved here.** This covers the overwhelming majority of
 questions with zero routing cost.
+
+Questions with pilot signal phrases (e.g. `"pilot"`, `"pilots"`, `"how many
+pilots"`, `"harvester worker"`, `"nworkers"`) bypass the topic guard entirely
+and route directly to `panda_harvester_workers`.  Site is extracted from the
+question text when a known ATLAS site name is present; temporal expressions
+(`"since yesterday"`, `"last 6 hours"`, `"today"`, explicit ISO ranges) are
+translated into `from_dt`/`to_dt` arguments before the plan is built.  The
+pilot rule is checked before the jobs DB rule because the word `"pilot"` can
+co-occur with jobs DB signal phrases.
 
 Questions with jobs DB signal phrases (e.g. `"failed at BNL"`, `"top errors
 at SWT2_CPB"`, `"each status"`, `"last updated"`) bypass the topic guard
@@ -125,10 +135,18 @@ Example entry point:
 
 ```toml
 [project.entry-points."bamboo.tools"]
-"atlas.task_status" = "askpanda_atlas.task_status:panda_task_status_tool"
+"atlas.task_status"       = "askpanda_atlas.task_status:panda_task_status_tool"
+"atlas.harvester_workers" = "askpanda_atlas.harvester_worker:panda_harvester_workers_tool"
 ```
 
 Built-in tools are also registered directly in `bamboo.core.TOOLS`.
+
+> **`panda_harvester_workers`** is registered as a plugin tool via the
+> `askpanda_atlas` package entry point `atlas.harvester_workers`.  It fetches
+> live Harvester pilot/worker counts from the BigPanDA API endpoint
+> `/harvester/getworkerstats/`.  See the
+> [CLAUDE.md Harvester Workers section](../CLAUDE.md#harvester-workers-harvester_worker_implpy)
+> for full implementation details.
 
 ## Tool execution contract
 
@@ -238,6 +256,7 @@ combination of IDs and keywords builds a `Plan` object with no LLM call:
 | job_id + analysis keywords | `FAST_PATH` | `panda_log_analysis` |
 | job_id only (no task_id) | `FAST_PATH` | `panda_job_status` |
 | task_id | `FAST_PATH` | `panda_task_status` |
+| pilot/Harvester signals, no IDs | `FAST_PATH` | `panda_harvester_workers` |
 | jobs DB signals, no IDs | `FAST_PATH` | `panda_jobs_query` |
 | no ID | `RETRIEVE` | `panda_doc_search` (top_k=5) + `panda_doc_bm25` (top_k=5) |
 
@@ -277,6 +296,7 @@ selected by `_pick_synthesis_prompt()` based on which tools ran:
 | `panda_log_analysis` | Log-analysis diagnostic prompt |
 | `panda_job_status` | Job-status summary prompt |
 | `panda_task_status` | Task-metadata summary prompt |
+| `panda_harvester_workers` | Pilot stats prompt (describes pivot table, flat breakdowns, and time window fields) |
 | `panda_jobs_query` | Jobs DB prompt (explicitly tells the LLM `"error": null` means success) |
 | `panda_doc_search` or `panda_doc_bm25` | RAG documentation prompt |
 | other / mixed | Generic multi-tool prompt |

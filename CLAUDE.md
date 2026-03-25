@@ -68,21 +68,22 @@ python -m interfaces.textual.chat
 
 ```python
 TOOLS = {
-    "bamboo_health":        bamboo_health_tool,        # Server status + LLM info
-    "bamboo_llm_answer":    bamboo_llm_answer_tool,    # Raw LLM passthrough
-    "bamboo_answer":        bamboo_answer_tool,        # Primary orchestration entry point
-    "bamboo_plan":          bamboo_plan_tool,          # LLM-driven planner
-    "bamboo_last_evidence": bamboo_last_evidence_tool, # Retrieve last tool evidence for TUI
-    "panda_doc_search":     panda_doc_search_tool,     # Vector RAG
-    "panda_doc_bm25":       panda_doc_bm25_tool,       # BM25 keyword search
-    "panda_queue_info":     panda_queue_info_tool,
-    "panda_task_status":    panda_task_status_tool,
-    "panda_job_status":     panda_job_status_tool,
-    "panda_log_analysis":   panda_log_analysis_tool,
-    "panda_pilot_status":   panda_pilot_status_tool,
-    "panda_jobs_query":     panda_jobs_query_tool,     # NL→SQL against ingestion DuckDB
+    "bamboo_health":           bamboo_health_tool,        # Server status + LLM info
+    "bamboo_llm_answer":       bamboo_llm_answer_tool,    # Raw LLM passthrough
+    "bamboo_answer":           bamboo_answer_tool,        # Primary orchestration entry point
+    "bamboo_plan":             bamboo_plan_tool,          # LLM-driven planner
+    "bamboo_last_evidence":    bamboo_last_evidence_tool, # Retrieve last tool evidence for TUI
+    "panda_doc_search":        panda_doc_search_tool,     # Vector RAG
+    "panda_doc_bm25":          panda_doc_bm25_tool,       # BM25 keyword search
+    "panda_queue_info":        panda_queue_info_tool,
+    "panda_task_status":       panda_task_status_tool,
+    "panda_job_status":        panda_job_status_tool,
+    "panda_log_analysis":      panda_log_analysis_tool,
+    "panda_jobs_query":        panda_jobs_query_tool,     # NL→SQL against ingestion DuckDB
+    "panda_harvester_workers": panda_harvester_workers_tool, # Harvester pilot/worker stats
 }
-# panda_jobs_query is conditionally added after the dict if askpanda_atlas is installed.
+# panda_jobs_query and panda_harvester_workers are conditionally added after
+# the dict if askpanda_atlas is installed.
 ```
 
 ### Routing (`core/bamboo/tools/bamboo_answer.py`)
@@ -95,18 +96,22 @@ TOOLS = {
 - **`_resolve_contextual_ids(question, task_id, job_id, history)`** — fills in `task_id`/`job_id` from history for contextual follow-ups when the current question has none of its own. Two detection paths:
   1. **Explicit back-reference**: pronouns/demonstratives (`"those"`, `"them"`, `"that task"`, `"it"`) — always scans history.
   2. **Implicit short follow-up**: ≤ 10 words + status-specific domain term (`"failed"`, `"finished"`, `"running"`, etc.) — only applies the found ID if history actually contains one.
-- **`_build_deterministic_plan(rag_query, task_id, job_id)`** — fast-path routing without an LLM call: job ID + analysis keywords → `panda_log_analysis`; job ID → `panda_job_status`; task ID → `panda_task_status`; jobs DB signals (no IDs) → `panda_jobs_query`; no IDs → RAG retrieval.
+- **`_build_deterministic_plan(rag_query, task_id, job_id)`** — fast-path routing without an LLM call: job ID + analysis keywords → `panda_log_analysis`; job ID → `panda_job_status`; task ID → `panda_task_status`; pilot/Harvester signals (no IDs) → `panda_harvester_workers`; jobs DB signals (no IDs) → `panda_jobs_query`; no IDs → RAG retrieval. The pilot rule runs before the jobs DB rule because the word "pilot" can co-occur with jobs DB signal phrases.
+- **`_is_pilot_question(question)`** — returns `True` when the question contains pilot/Harvester signal phrases (`"pilot"`, `"pilots"`, `"harvester worker"`, `"nworkers"`, `"pilot count"`, etc.) regardless of site or time expression. Used by the pilot fast-path intercept to bypass the topic guard for clearly on-topic pilot queries.
+- **`_extract_site_from_question(question)`** — returns the first known ATLAS site name found in the question (BNL, CERN, AGLT2, SLAC, etc.), or `None` to query all sites.
+- **`_extract_time_window_from_question(question)`** — translates natural-language temporal expressions into explicit ISO-8601 `(from_dt, to_dt)` pairs (UTC). Handles: `"last/past N hours/minutes/days"`, `"yesterday"`, `"since yesterday"`, `"today"`, explicit `"between ISO and ISO"` ranges. Returns `None` for `"right now"` / `"currently"` / no temporal expression, in which case the tool defaults to the last hour.
 - **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases (`"failed at"`, `"top errors"`, `"each status"`, `"which queues"`, `"last updated"`, etc.) and no `"task"` keyword. Used by the fast-path intercept to skip the topic guard for clearly on-topic DB queries.
 - **`QUERYABLE_DATABASES`** — registry of queryable databases (`{"jobs": "...", ...}`). Currently one entry; add `"cric"` when CRIC integration lands. When more than one entry is present, `_resolve_target_database()` is called to detect ambiguous questions; `_build_clarification_response()` prompts the user to specify which database they mean.
 
 Routing order in `_route()`:
 1. `bypass_routing` → direct LLM passthrough
 2. Social intercept (greeting / ack)
-3. **Jobs DB fast-path intercept** — contextual ID resolution from history runs first; if no ID found and `_is_jobs_db_question()` matches, the topic guard is skipped entirely and the question routes directly to `panda_jobs_query`. Saves ~3s per query.
-4. Topic guard + content-free followup reformulation
-5. ID extraction from question, then contextual ID resolution from history
-6. Deterministic fast-path plan
-7. LLM planner fallback (`bamboo_plan` with `execute=True`)
+3. **Pilot fast-path intercept** — contextual ID resolution from history runs first; if no ID found and `_is_pilot_question()` matches, the topic guard is skipped and the question routes directly to `panda_harvester_workers` with `site`, `from_dt`, and `to_dt` extracted from the question text.
+4. **Jobs DB fast-path intercept** — same pattern: if no ID found and `_is_jobs_db_question()` matches, routes directly to `panda_jobs_query`. Both fast-paths save ~3s per query by bypassing the topic guard LLM call.
+5. Topic guard + content-free followup reformulation
+6. ID extraction from question, then contextual ID resolution from history
+7. Deterministic fast-path plan
+8. LLM planner fallback (`bamboo_plan` with `execute=True`)
 
 ### Execution (`core/bamboo/tools/bamboo_executor.py`)
 
@@ -114,7 +119,7 @@ Routing order in `_route()`:
 
 - After each successful tool call, the full evidence dict (including `raw_payload`) is stored in `_last_evidence_store[tool_name]`. `raw_payload` is **stripped before synthesis** so the LLM only sees the compact evidence fields.
 - `BambooLastEvidenceTool` (`bamboo_last_evidence`) exposes the store via MCP. Accepts `mode="evidence"` (compact dict, `raw_payload` excluded) or `mode="raw"` (verbatim BigPanDA API response). Used by the TUI `/inspect` and `/json` commands.
-- `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_jobs_query` → jobs DB prompt (explicitly tells the LLM that `"error": null` means success); `panda_doc_*` → RAG documentation; other → generic.
+- `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_harvester_workers` → pilot stats prompt (describes pivot table, flat breakdowns, and time window); `panda_jobs_query` → jobs DB prompt (explicitly tells the LLM that `"error": null` means success); `panda_doc_*` → RAG documentation; other → generic.
 
 ### LLM Passthrough (`core/bamboo/tools/llm_passthrough.py`)
 
@@ -179,6 +184,37 @@ Key design decisions:
 - `PANDA_DUCKDB_PATH` env var (default: `jobs.duckdb`) controls the database path.
 
 Schema context and SQL generation prompt live in `jobs_query_schema.py`. The prompt includes six few-shot examples covering freshness queries, counts, group-by, errors, cross-queue ranking, and job listing.
+
+#### Harvester Workers (`harvester_worker_impl.py`)
+
+Fetches live Harvester pilot/worker counts from the BigPanDA Harvester API.
+
+Endpoint: `GET /harvester/getworkerstats/?lastupdate_from=<ISO>&lastupdate_to=<ISO>[&computingsite=<SITE>]`
+
+The API returns a JSON array of records, each describing `nworkers` for a specific combination of `computingsite`, `harvesterid`, `jobtype`, `resourcetype`, and `status`. Workers and pilots are synonymous in this context.
+
+Public surface:
+- `fetch_worker_stats(base_url, from_dt, to_dt, site) -> dict` — synchronous; call via `asyncio.to_thread()`. Fetches via `cached_fetch_jsonish` (30 s TTL — shorter than metadata TTL because pilot counts change frequently), extracts records from the `{"_data": [...]}` wrapper that `fetch_jsonish` produces for top-level JSON arrays, aggregates, and attaches `raw_payload`.
+- `PandaHarvesterWorkersTool` / `get_definition()` / `panda_harvester_workers_tool` singleton.
+
+Evidence structure (what the LLM sees — `raw_payload` is stripped before synthesis):
+- `nworkers_total` — grand total across all statuses.
+- `nworkers_by_status`, `nworkers_by_jobtype`, `nworkers_by_resourcetype`, `nworkers_by_site` — flat one-dimensional breakdowns, sorted by count descending.
+- `pivot` — list of `{status, jobtype, resourcetype, nworkers}` dicts sorted by `nworkers` descending, summed across all harvester instances and sites. Bounded by `len(statuses) × len(jobtypes) × len(resourcetypes)` (≤ ~54 rows in practice). Allows the LLM to answer any combination of these three dimensions — including three-way slices like "running MCORE managed pilots" — without raw records.
+- `total_records`, `from_dt`, `to_dt`, `site_filter`, `error`.
+
+Site is excluded from the pivot deliberately: scoped queries should use `site_filter` on the API call, making the pivot already site-specific. For all-sites queries, `nworkers_by_site` covers per-site totals.
+
+Key design decisions:
+- **`asyncio.to_thread` for HTTP** — unlike DuckDB (which must run on the event loop thread), HTTP fetches are safe with the thread pool on all platforms.
+- **30 s cache TTL** — pilot counts change much more frequently than task/job metadata; the standard 60 s TTL would give stale answers to "right now" questions.
+- **Time window defaults to last hour** — `_default_window()` is called when `from_dt`/`to_dt` are absent from `arguments`, so the tool always has a valid query window.
+- **Temporal extraction happens at the router, not the tool** — `_extract_time_window_from_question()` in `bamboo_answer.py` translates natural-language time expressions (`"since yesterday"`, `"last 6 hours"`, `"today"`, explicit ISO ranges) into `from_dt`/`to_dt` before the fast-path plan is built. The tool itself is stateless with respect to time.
+
+Entry point registration in `pyproject.toml`:
+```toml
+"atlas.harvester_workers" = "askpanda_atlas.harvester_worker:panda_harvester_workers_tool"
+```
 
 #### Log Analysis (`log_analysis_impl.py`)
 

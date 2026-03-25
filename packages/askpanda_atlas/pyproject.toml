@@ -13,6 +13,7 @@ dependencies = [
 "atlas.log_analysis" = "askpanda_atlas.log_analysis:panda_log_analysis_tool"
 "atlas.ui_manifest" = "askpanda_atlas.ui_manifest:atlas_ui_manifest_tool"
 "atlas.jobs_query" = "askpanda_atlas.jobs_query:panda_jobs_query_tool"
+"atlas.harvester_workers" = "askpanda_atlas.harvester_worker:panda_harvester_workers_tool"
 
 [build-system]
 requires = ["setuptools>=69"]

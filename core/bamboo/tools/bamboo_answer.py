@@ -447,6 +447,167 @@ def _is_jobs_db_question(question: str) -> bool:
     return any(sig in q for sig in _JOBS_DB_SIGNALS)
 
 
+# Signal phrases that unambiguously indicate a Harvester pilot/worker question.
+# These bypass the topic guard (same pattern as jobs DB signals) because they
+# are unambiguously on-topic and the guard LLM call would add ~3 s of latency.
+# Phrases are matched against the lowercased question string.
+_PILOT_SIGNALS: frozenset[str] = frozenset({
+    # Direct pilot / worker references
+    "pilot",
+    "pilots",
+    "harvester worker",
+    "harvester workers",
+    "worker count",
+    "worker status",
+    "nworkers",
+    # Status-specific pilot questions
+    "pilots running",
+    "pilots idle",
+    "pilots failed",
+    "pilots submitted",
+    "pilots finished",
+    "running pilots",
+    "idle pilots",
+    "failed pilots",
+    "submitted pilots",
+    # Temporal pilot questions
+    "pilot count",
+    "pilot counts",
+    "pilot activity",
+    "pilot statistics",
+    "pilot stats",
+    "pilot monitor",
+    "pilot health",
+})
+
+
+def _is_pilot_question(question: str) -> bool:
+    """Return ``True`` when the question is about Harvester pilots/workers.
+
+    Checks for unambiguous pilot/Harvester signal phrases that route to
+    ``panda_harvester_workers`` rather than the jobs DB or documentation
+    index.  Questions that also contain a task or job ID are excluded here
+    (they route through the normal ID-based path first).
+
+    The heuristic requires at least one signal from :data:`_PILOT_SIGNALS`.
+    False negatives are acceptable — the LLM planner will catch them.
+
+    Args:
+        question: User question text (before any normalisation).
+
+    Returns:
+        ``True`` if the question should be routed to ``panda_harvester_workers``.
+    """
+    q = question.lower()
+    return any(sig in q for sig in _PILOT_SIGNALS)
+
+
+def _extract_site_from_question(question: str) -> str | None:
+    """Extract a computing site name from a pilot question, if present.
+
+    Applies a conservative set of known ATLAS site names.  Returns the
+    first match found (case-insensitive).  Returns ``None`` when no known
+    site name appears — the tool will then query across all sites.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        Site name string (uppercase), or ``None`` if not found.
+    """
+    # Common ATLAS computing site names.  Extend as needed.
+    _KNOWN_SITES: tuple[str, ...] = (
+        "BNL", "CERN", "AGLT2", "SLAC", "SWT2", "TRIUMF", "IN2P3",
+        "NIKHEF", "PIC", "SARA", "TOKYO", "BEIJING", "TAIWAN",
+        "GRIF", "IFIC", "INFN", "JINR", "KIAE", "SIGNET",
+    )
+    q_upper = question.upper()
+    for site in _KNOWN_SITES:
+        if site in q_upper:
+            return site
+    return None
+
+
+def _extract_time_window_from_question(
+    question: str,
+) -> tuple[str, str] | None:
+    """Extract an explicit time window from a pilot question, if present.
+
+    Translates natural-language temporal expressions into ISO-8601
+    ``(from_dt, to_dt)`` pairs (UTC, no timezone suffix) suitable for
+    passing directly to the Harvester API.  Returns ``None`` when no
+    recognised expression is found, in which case the tool falls back to
+    its own default (the last hour).
+
+    Recognised patterns (case-insensitive):
+    - "last N hours" / "past N hours" / "in the last N hours"
+    - "last N minutes" / "past N minutes"
+    - "last N days" / "past N days"
+    - "yesterday" / "since yesterday"
+    - "today"
+    - "last 24 hours" (handled by the N-hours rule above)
+    - "right now" / "now" / "currently" → ``None`` (use tool default)
+    - "between YYYY-MM-DDTHH:MM:SS and YYYY-MM-DDTHH:MM:SS" → verbatim
+
+    Args:
+        question: User question text.
+
+    Returns:
+        ``(from_dt, to_dt)`` ISO-8601 strings (UTC), or ``None`` if no
+        temporal expression was found or the expression means "now".
+    """
+    import re
+    from datetime import datetime, timedelta, timezone
+
+    q = question.lower()
+    now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+
+    def _fmt(dt: datetime) -> str:
+        """Format a datetime as a bare ISO-8601 string without timezone suffix."""
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Explicit ISO range: "between 2026-03-24T00:00:00 and 2026-03-25T00:00:00"
+    _iso_range = re.search(
+        r"between\s+(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})"
+        r"\s+and\s+(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})",
+        question,
+        re.IGNORECASE,
+    )
+    if _iso_range:
+        return _iso_range.group(1), _iso_range.group(2)
+
+    # "last/past N hours/minutes/days"
+    _window = re.search(
+        r"(?:last|past|in\s+the\s+last|in\s+the\s+past)\s+(\d+)\s+"
+        r"(hour|hours|hr|hrs|minute|minutes|min|mins|day|days)",
+        q,
+    )
+    if _window:
+        n = int(_window.group(1))
+        unit = _window.group(2)
+        if unit.startswith("min"):
+            delta = timedelta(minutes=n)
+        elif unit.startswith("day"):
+            delta = timedelta(days=n)
+        else:
+            delta = timedelta(hours=n)
+        return _fmt(now - delta), _fmt(now)
+
+    # "yesterday" / "since yesterday"
+    if re.search(r"\b(?:since\s+)?yesterday\b", q):
+        midnight_today = now.replace(hour=0, minute=0, second=0)
+        midnight_yesterday = midnight_today - timedelta(days=1)
+        return _fmt(midnight_yesterday), _fmt(now)
+
+    # "today" / "since today" / "so far today"
+    if re.search(r"\b(?:since\s+)?today\b", q):
+        midnight_today = now.replace(hour=0, minute=0, second=0)
+        return _fmt(midnight_today), _fmt(now)
+
+    # "right now" / "currently" / "now" → use tool default (last hour)
+    return None
+
+
 def _build_deterministic_plan(
     question: str,
     task_id: int | None,
@@ -454,15 +615,16 @@ def _build_deterministic_plan(
 ) -> "Plan | None":
     """Build a Plan without an LLM call for unambiguous routing cases.
 
-    Returns a validated Plan for the five clear-cut routes, or ``None`` when
+    Returns a validated Plan for the six clear-cut routes, or ``None`` when
     the question is ambiguous enough to need the LLM planner.
 
     Fast-path rules (in priority order):
-    1. Job ID + analysis keywords → ``panda_log_analysis``  FAST_PATH
-    2. Job ID (no task ID)        → ``panda_job_status``    FAST_PATH
-    3. Task ID                    → ``panda_task_status``   FAST_PATH
-    4. Jobs DB signals (no IDs)   → ``panda_jobs_query``    FAST_PATH
-    5. No IDs                     → ``panda_doc_search`` + ``panda_doc_bm25`` RETRIEVE
+    1. Job ID + analysis keywords → ``panda_log_analysis``       FAST_PATH
+    2. Job ID (no task ID)        → ``panda_job_status``         FAST_PATH
+    3. Task ID                    → ``panda_task_status``         FAST_PATH
+    4. Pilot/Harvester signals    → ``panda_harvester_workers``  FAST_PATH
+    5. Jobs DB signals (no IDs)   → ``panda_jobs_query``         FAST_PATH
+    6. No IDs                     → ``panda_doc_search`` + ``panda_doc_bm25`` RETRIEVE
 
     Args:
         question: User question text.
@@ -509,6 +671,28 @@ def _build_deterministic_plan(
             )],
             reuse_policy=reuse,
             explain="Deterministic: task ID present → task status.",
+        )
+
+    # Pilot / Harvester fast-path: pilot-specific signal phrases are unambiguously
+    # on-topic and resolve to panda_harvester_workers without a topic-guard LLM call.
+    # Checked before the jobs DB path because "pilot" can co-occur with jobs signals.
+    if _is_pilot_question(question):
+        pilot_args: dict[str, str] = {"question": question}
+        site = _extract_site_from_question(question)
+        if site:
+            pilot_args["site"] = site
+        window = _extract_time_window_from_question(question)
+        if window:
+            pilot_args["from_dt"], pilot_args["to_dt"] = window
+        return Plan(
+            route=PlanRoute.FAST_PATH,
+            confidence=0.95,
+            tool_calls=[ToolCall(
+                tool="panda_harvester_workers",
+                arguments=pilot_args,
+            )],
+            reuse_policy=reuse,
+            explain="Deterministic: pilot/Harvester signals, no task/job ID → harvester workers.",
         )
 
     # Jobs DB fast-path: no IDs but the question is about live job stats.
@@ -797,6 +981,53 @@ def _resolve_contextual_ids(
     return task_id, job_id
 
 
+async def _run_fast_path_intercepts(
+    question: str,
+    history: list[Message],
+) -> "list[MCPContent] | None":
+    """Run pilot and jobs-DB fast-path intercepts, bypassing the topic guard.
+
+    Performs early contextual ID resolution and, when no ID is present,
+    checks for unambiguous pilot or jobs-DB signal phrases.  If either
+    matches, builds a deterministic plan and executes it immediately.
+
+    Returns the synthesised answer when a fast-path fires, or ``None``
+    when neither intercept matches and normal routing should continue.
+
+    Args:
+        question: The current user question.
+        history: Prior conversation turns.
+
+    Returns:
+        ``list[MCPContent]`` if a fast-path was taken, else ``None``.
+    """
+    task_id_early = _extract_task_id(question)
+    job_id_early = _extract_job_id(question)
+    task_id_early, job_id_early = _resolve_contextual_ids(
+        question, task_id_early, job_id_early, history
+    )
+
+    if not task_id_early and not job_id_early:
+        # Pilot / Harvester fast-path — checked before jobs DB because
+        # "pilot" can overlap with jobs DB signal phrases.
+        if _is_pilot_question(question):
+            fast_plan = _build_deterministic_plan(question, None, None)
+            if fast_plan is not None:
+                return await execute_plan(fast_plan, question, history)
+
+        # Jobs DB fast-path.
+        if _is_jobs_db_question(question):
+            if len(QUERYABLE_DATABASES) > 1:
+                target_db = _resolve_target_database(question)
+                if target_db is None:
+                    return text_content(_build_clarification_response(question))
+            fast_plan = _build_deterministic_plan(question, None, None)
+            if fast_plan is not None:
+                return await execute_plan(fast_plan, question, history)
+
+    return None
+
+
 class BambooAnswerTool:
     """MCP tool that answers questions about ATLAS PanDA tasks and jobs.
 
@@ -940,30 +1171,11 @@ class BambooAnswerTool:
         if _is_ack(question):
             return text_content(_ACK_RESPONSE)
 
-        # Jobs DB fast-path intercept — skip the topic guard entirely for
-        # questions that deterministically route to panda_jobs_query.  These
-        # are clearly on-topic by construction (they contain PanDA-specific
-        # signal phrases) and the guard LLM call would add ~3s for no benefit.
-        #
-        # Contextual ID resolution must run first: a question like "how many
-        # of those jobs failed?" matches _JOBS_DB_SIGNALS but refers to a
-        # task in history — it should route to panda_task_status, not the
-        # jobs DB.  Only bypass when no ID can be resolved from history either.
-        task_id_early = _extract_task_id(question)
-        job_id_early = _extract_job_id(question)
-        task_id_early, job_id_early = _resolve_contextual_ids(
-            question, task_id_early, job_id_early, history
-        )
-        if not task_id_early and not job_id_early and _is_jobs_db_question(question):
-            # When multiple databases are registered, ask for clarification
-            # if the question does not unambiguously identify one.
-            if len(QUERYABLE_DATABASES) > 1:
-                target_db = _resolve_target_database(question)
-                if target_db is None:
-                    return text_content(_build_clarification_response(question))
-            fast_plan = _build_deterministic_plan(question, None, None)
-            if fast_plan is not None:
-                return await execute_plan(fast_plan, question, history)
+        # Fast-path intercepts — pilot and jobs DB — bypass the topic guard
+        # for clearly on-topic questions.  See _run_fast_path_intercepts().
+        intercept = await _run_fast_path_intercepts(question, history)
+        if intercept is not None:
+            return intercept
 
         # Topic guard + content-free followup reformulation.
         rag_query, blocked = await _run_topic_guard(question, history)
@@ -1016,4 +1228,8 @@ __all__ = [
     "_resolve_target_database",
     "_build_clarification_response",
     "_is_jobs_db_question",
+    "_is_pilot_question",
+    "_extract_site_from_question",
+    "_extract_time_window_from_question",
+    "_PILOT_SIGNALS",
 ]

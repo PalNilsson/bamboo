@@ -37,7 +37,7 @@ from bamboo.tools.queue_info import panda_queue_info_tool
 from bamboo.tools.task_status import panda_task_status_tool
 from bamboo.tools.job_status import panda_job_status_tool
 from bamboo.tools.log_analysis import panda_log_analysis_tool
-from bamboo.tools.pilot_monitor import panda_pilot_status_tool
+from askpanda_atlas.harvester_worker import panda_harvester_workers_tool  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Tool registry — mirrors bamboo.core.TOOLS without importing core.py
@@ -54,7 +54,7 @@ TOOLS: dict[str, Any] = {
     "panda_task_status": panda_task_status_tool,
     "panda_job_status": panda_job_status_tool,
     "panda_log_analysis": panda_log_analysis_tool,
-    "panda_pilot_status": panda_pilot_status_tool,
+    "panda_harvester_workers": panda_harvester_workers_tool,
 }
 
 _TOOL_NAMES: list[str] = sorted(TOOLS.keys())
@@ -104,7 +104,7 @@ _STUB_ARGS: dict[str, dict[str, Any]] = {
     "panda_task_status": {"task_id": 1},
     "panda_job_status": {"job_id": 1},
     "panda_log_analysis": {"job_id": 1},
-    "panda_pilot_status": {"site": "BNL-ATLAS"},
+    "panda_harvester_workers": {"question": "How many pilots are running at BNL?"},
 }
 
 # ---------------------------------------------------------------------------
@@ -278,6 +278,9 @@ def _build_patches() -> list[tuple[str, Any]]:
         ("askpanda_atlas.log_analysis_impl._fetch_log_text", MagicMock(return_value=None)),
         # task_status makes an HTTP fetch
         ("bamboo.tools.task_status_atlas.fetch_jsonish", fetch_mock),
+        # panda_harvester_workers makes an HTTP fetch via the cache
+        ("askpanda_atlas._cache.cached_fetch_jsonish",
+         MagicMock(return_value=(200, "application/json", "[]", {"_data": []}))),
     ]
 
 
