@@ -50,6 +50,11 @@ from bamboo.tools.task_status import panda_task_status_tool
 from bamboo.tools.job_status import panda_job_status_tool  # type: ignore[import-untyped]
 from bamboo.tools.log_analysis import panda_log_analysis_tool  # type: ignore[import-untyped]
 from bamboo.tools.pilot_monitor import panda_pilot_status_tool
+try:
+    from askpanda_atlas.jobs_query import panda_jobs_query_tool  # type: ignore[import]
+    _JOBS_QUERY_AVAILABLE = True
+except ImportError:
+    _JOBS_QUERY_AVAILABLE = False
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.bamboo_answer import bamboo_answer_tool
 from bamboo.tools.planner import bamboo_plan_tool
@@ -75,6 +80,8 @@ TOOLS = {
     "panda_log_analysis": panda_log_analysis_tool,
     "panda_pilot_status": panda_pilot_status_tool,
 }
+if _JOBS_QUERY_AVAILABLE:
+    TOOLS["panda_jobs_query"] = panda_jobs_query_tool
 
 
 def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:

@@ -4,12 +4,15 @@ version = "0.0.1"
 requires-python = ">=3.10"
 dependencies = [
   "requests>=2.0",
+  "duckdb>=0.10",
+  "sqlglot>=23.0",
 ]
 
 [project.entry-points."bamboo.tools"]
 "atlas.task_status" = "askpanda_atlas.task_status:panda_task_status_tool"
 "atlas.log_analysis" = "askpanda_atlas.log_analysis:panda_log_analysis_tool"
 "atlas.ui_manifest" = "askpanda_atlas.ui_manifest:atlas_ui_manifest_tool"
+"atlas.jobs_query" = "askpanda_atlas.jobs_query:panda_jobs_query_tool"
 
 [build-system]
 requires = ["setuptools>=69"]

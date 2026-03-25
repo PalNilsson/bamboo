@@ -134,6 +134,21 @@ _SYSTEM_GENERIC: str = (
     "- Be concise and prefer bullet points for multi-part answers.\n"
 )
 
+_SYSTEM_JOBS_QUERY: str = (
+    "You are AskPanDA, an expert assistant for the PanDA workload management "
+    "system and ATLAS experiment workflows at CERN.\n"
+    "You have queried the live PanDA jobs database and received structured results.\n"
+    "The evidence contains: the SQL query that was executed, the result rows, "
+    "row_count, and an error field (null means success — do NOT treat null as an error).\n"
+    "Rules:\n"
+    "- Answer directly and concisely from the rows and row_count in the evidence.\n"
+    "- If error is null and rows are present, give the answer confidently.\n"
+    "- If row_count is 0, say no matching jobs were found.\n"
+    "- If the error field contains a non-null string, explain the problem clearly.\n"
+    "- Do not fabricate job counts or status values not present in the rows.\n"
+    "- Be concise. For count questions, lead with the number.\n"
+)
+
 # ---------------------------------------------------------------------------
 # RAG helpers (moved from bamboo_answer.py)
 # ---------------------------------------------------------------------------
@@ -389,6 +404,8 @@ def _pick_synthesis_prompt(tool_names: list[str]) -> str:
         return _SYSTEM_JOB
     if "panda_task_status" in tool_names:
         return _SYSTEM_TASK
+    if "panda_jobs_query" in tool_names:
+        return _SYSTEM_JOBS_QUERY
     if any(t in tool_names for t in ("panda_doc_search", "panda_doc_bm25")):
         return _SYSTEM_RAG
     return _SYSTEM_GENERIC
@@ -631,6 +648,7 @@ __all__ = [
     "_SYSTEM_RAG",
     "_SYSTEM_RAG_NO_CONTEXT",
     "_SYSTEM_GENERIC",
+    "_SYSTEM_JOBS_QUERY",
     "bamboo_last_evidence_tool",
 ]
 

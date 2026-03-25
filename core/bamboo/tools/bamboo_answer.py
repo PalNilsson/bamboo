@@ -289,6 +289,167 @@ def _friendly_llm_error(exc: LLMError) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Multi-database registry
+# ---------------------------------------------------------------------------
+
+#: Registry of queryable databases.  Key is the canonical name used in
+#: routing; value is the human-readable description shown to the user when
+#: clarification is needed.  Add a new entry here when a new database
+#: comes online (e.g. CRIC).  The jobs DB entry must always be present.
+QUERYABLE_DATABASES: dict[str, str] = {
+    "jobs": "PanDA jobs database (computing site job statistics, error counts)",
+    # Uncomment when CRIC integration is ready:
+    # "cric": "CRIC (Computing Resource Information Catalogue — sites, queues, pledges)",
+}
+
+#: Words that unambiguously identify a specific database in the question.
+#: Each key must match a key in :data:`QUERYABLE_DATABASES`.
+_DB_KEYWORDS: dict[str, frozenset[str]] = {
+    "jobs": frozenset({
+        "job", "jobs", "failed", "failing", "running", "finished",
+        "starting", "waiting", "error", "errors", "pilot", "pandaid",
+        "queue", "computing site", "bnl", "cern", "aglt2", "slac",
+        "swt2", "triumf", "in2p3", "nikhef", "pic", "sara",
+    }),
+    # "cric": frozenset({
+    #     "cric", "pledge", "resource", "capacity", "site capacity",
+    #     "cpu pledge", "disk pledge",
+    # }),
+}
+
+
+def _resolve_target_database(question: str) -> str | None:
+    """Return the unambiguous target database name, or ``None`` if unclear.
+
+    Scans the question for keywords from :data:`_DB_KEYWORDS`.  If exactly
+    one database matches, returns its name.  If zero or multiple match
+    (ambiguous), returns ``None``.
+
+    When only one database is registered in :data:`QUERYABLE_DATABASES`,
+    always returns that database — no disambiguation needed.
+
+    Args:
+        question: The user's question text (before any normalisation).
+
+    Returns:
+        Canonical database name string, or ``None`` if ambiguous.
+    """
+    if len(QUERYABLE_DATABASES) <= 1:
+        # Only one database registered — no ambiguity possible.
+        return next(iter(QUERYABLE_DATABASES), None)
+
+    q = question.lower()
+    matches = {
+        db
+        for db, keywords in _DB_KEYWORDS.items()
+        if db in QUERYABLE_DATABASES and any(kw in q for kw in keywords)
+    }
+
+    if len(matches) == 1:
+        return next(iter(matches))
+    return None
+
+
+def _build_clarification_response(question: str) -> str:
+    """Build a clarification message asking which database the user means.
+
+    Args:
+        question: The original user question.
+
+    Returns:
+        A plain-text clarification prompt listing the available databases.
+    """
+    db_list = "\n".join(
+        f"  • **{name}** — {desc}"
+        for name, desc in QUERYABLE_DATABASES.items()
+    )
+    return (
+        f"I can query multiple databases. Which one did you mean?\n\n"
+        f"{db_list}\n\n"
+        f"Please rephrase your question mentioning the database name "
+        f"(e.g. \"in the jobs database\" or \"in CRIC\")."
+    )
+
+
+# Signal words that, when present in a question without a task/job ID, suggest
+# the user is asking about live job statistics from the ingestion database
+# rather than a documentation or task-level question.
+_JOBS_DB_SIGNALS: frozenset[str] = frozenset({
+    "how many",
+    "count",
+    "failed at",
+    "failing at",
+    "running at",
+    "finished at",
+    "starting at",
+    "errors at",
+    "top errors",
+    "job status at",
+    "which jobs",
+    "jobs at",
+    "jobs failed",
+    "jobs running",
+    "jobs finished",
+    "jobs failed at",
+    # Cross-queue / ranking questions
+    "most failed",
+    "most errors",
+    "most jobs",
+    "queues with",
+    "which queues",
+    "which sites",
+    "across queues",
+    "across sites",
+    # Status breakdown
+    "each status",
+    "by status",
+    "status breakdown",
+    "status count",
+    # Database freshness / metadata
+    "last updated",
+    "last fetched",
+    "database last",
+    "db last",
+    "when was the",
+    "how fresh",
+    "how old is",
+    "how recent",
+    # Common verb forms not covered above
+    "ran at",
+    "ran on",
+    "running on",
+    "failed on",
+    "finished on",
+})
+
+
+def _is_jobs_db_question(question: str) -> bool:
+    """Return ``True`` when the question looks like a live jobs DB lookup.
+
+    Detects questions about job counts, statuses, or error frequencies at a
+    specific computing site that are best answered by querying the ingestion
+    DuckDB database rather than the documentation index.
+
+    The heuristic is intentionally conservative: it requires at least one
+    signal phrase from :data:`_JOBS_DB_SIGNALS` and the absence of the word
+    "task" (task-level questions route to ``panda_task_status`` instead).
+
+    The LLM planner catches anything this heuristic misses, so false negatives
+    are acceptable; false positives would cause incorrect routing.
+
+    Args:
+        question: User question text (before any normalisation).
+
+    Returns:
+        ``True`` if the question should be routed to ``panda_jobs_query``.
+    """
+    q = question.lower()
+    if "task" in q:
+        return False
+    return any(sig in q for sig in _JOBS_DB_SIGNALS)
+
+
 def _build_deterministic_plan(
     question: str,
     task_id: int | None,
@@ -296,14 +457,15 @@ def _build_deterministic_plan(
 ) -> "Plan | None":
     """Build a Plan without an LLM call for unambiguous routing cases.
 
-    Returns a validated Plan for the four clear-cut routes, or ``None`` when
+    Returns a validated Plan for the five clear-cut routes, or ``None`` when
     the question is ambiguous enough to need the LLM planner.
 
     Fast-path rules (in priority order):
-    1. Job ID + analysis keywords → ``panda_log_analysis`` FAST_PATH
+    1. Job ID + analysis keywords → ``panda_log_analysis``  FAST_PATH
     2. Job ID (no task ID)        → ``panda_job_status``    FAST_PATH
     3. Task ID                    → ``panda_task_status``   FAST_PATH
-    4. No IDs                     → ``panda_doc_search`` + ``panda_doc_bm25`` RETRIEVE
+    4. Jobs DB signals (no IDs)   → ``panda_jobs_query``    FAST_PATH
+    5. No IDs                     → ``panda_doc_search`` + ``panda_doc_bm25`` RETRIEVE
 
     Args:
         question: User question text.
@@ -350,6 +512,19 @@ def _build_deterministic_plan(
             )],
             reuse_policy=reuse,
             explain="Deterministic: task ID present → task status.",
+        )
+
+    # Jobs DB fast-path: no IDs but the question is about live job stats.
+    if _is_jobs_db_question(question):
+        return Plan(
+            route=PlanRoute.FAST_PATH,
+            confidence=0.9,
+            tool_calls=[ToolCall(
+                tool="panda_jobs_query",
+                arguments={"question": question},
+            )],
+            reuse_policy=reuse,
+            explain="Deterministic: jobs DB signals, no task/job ID → jobs query.",
         )
 
     # No IDs: general knowledge / documentation question → always retrieve.
@@ -768,6 +943,23 @@ class BambooAnswerTool:
         if _is_ack(question):
             return text_content(_ACK_RESPONSE)
 
+        # Jobs DB fast-path intercept — skip the topic guard entirely for
+        # questions that deterministically route to panda_jobs_query.  These
+        # are clearly on-topic by construction (they contain PanDA-specific
+        # signal phrases) and the guard LLM call would add ~3s for no benefit.
+        task_id_early = _extract_task_id(question)
+        job_id_early = _extract_job_id(question)
+        if not task_id_early and not job_id_early and _is_jobs_db_question(question):
+            # When multiple databases are registered, ask for clarification
+            # if the question does not unambiguously identify one.
+            if len(QUERYABLE_DATABASES) > 1:
+                target_db = _resolve_target_database(question)
+                if target_db is None:
+                    return text_content(_build_clarification_response(question))
+            fast_plan = _build_deterministic_plan(question, None, None)
+            if fast_plan is not None:
+                return await execute_plan(fast_plan, question, history)
+
         # Topic guard + content-free followup reformulation.
         rag_query, blocked = await _run_topic_guard(question, history)
         if blocked:
@@ -811,4 +1003,12 @@ class BambooAnswerTool:
 
 bamboo_answer_tool = BambooAnswerTool()
 
-__all__ = ["BambooAnswerTool", "bamboo_answer_tool", "_extract_history"]
+__all__ = [
+    "BambooAnswerTool",
+    "bamboo_answer_tool",
+    "_extract_history",
+    "QUERYABLE_DATABASES",
+    "_resolve_target_database",
+    "_build_clarification_response",
+    "_is_jobs_db_question",
+]

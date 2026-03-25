@@ -12,6 +12,14 @@ export PANDA_BASE_URL="https://bigpanda.cern.ch"
 export ASKPANDA_PANDA_RETRIES="2"
 export ASKPANDA_PANDA_BACKOFF_SECONDS="0.8"
 
+# Path to the DuckDB file written by the ingestion agent.
+# Used by the panda_jobs_query tool (atlas.jobs_query).
+# Defaults to "jobs.duckdb" in the current working directory if unset.
+export PANDA_DUCKDB_PATH="jobs.duckdb"
+
+# Optional: maximum rows returned by panda_jobs_query (default: 500).
+# export PANDA_JOBS_QUERY_MAX_ROWS="500"
+
 ########################################
 # LLM PROFILE SELECTION
 ########################################
