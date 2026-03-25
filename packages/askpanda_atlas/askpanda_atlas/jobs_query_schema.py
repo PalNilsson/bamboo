@@ -31,13 +31,10 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import sqlglot
 import sqlglot.expressions as exp
-
-if TYPE_CHECKING:
-    pass
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -73,7 +70,7 @@ _SYSTEM_TABLE_NAMES: frozenset[str] = frozenset(
 _SYSTEM_TABLE_PREFIXES: tuple[str, ...] = ("duckdb_", "pg_", "sqlite_")
 
 # AST node types that are forbidden anywhere in the statement tree.
-_FORBIDDEN_NODE_TYPES: tuple[type[exp.Expression], ...] = (
+_FORBIDDEN_NODE_TYPES: tuple[type[Any], ...] = (
     exp.Insert,
     exp.Update,
     exp.Delete,
@@ -232,7 +229,7 @@ def validate_and_guard(sql: str) -> GuardResult:
     # --- Rule 1: parse must succeed -----------------------------------------
     try:
         statements = sqlglot.parse(sql, dialect="duckdb", error_level=sqlglot.ErrorLevel.RAISE)
-    except sqlglot.errors.ParseError as exc:
+    except sqlglot.ParseError as exc:
         return GuardResult(
             passed=False,
             rejection_reason=f"SQL could not be parsed: {exc}",

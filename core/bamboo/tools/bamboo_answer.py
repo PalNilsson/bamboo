@@ -388,9 +388,6 @@ _JOBS_DB_SIGNALS: frozenset[str] = frozenset({
     "job status at",
     "which jobs",
     "jobs at",
-    "jobs failed",
-    "jobs running",
-    "jobs finished",
     "jobs failed at",
     # Cross-queue / ranking questions
     "most failed",
@@ -947,8 +944,16 @@ class BambooAnswerTool:
         # questions that deterministically route to panda_jobs_query.  These
         # are clearly on-topic by construction (they contain PanDA-specific
         # signal phrases) and the guard LLM call would add ~3s for no benefit.
+        #
+        # Contextual ID resolution must run first: a question like "how many
+        # of those jobs failed?" matches _JOBS_DB_SIGNALS but refers to a
+        # task in history — it should route to panda_task_status, not the
+        # jobs DB.  Only bypass when no ID can be resolved from history either.
         task_id_early = _extract_task_id(question)
         job_id_early = _extract_job_id(question)
+        task_id_early, job_id_early = _resolve_contextual_ids(
+            question, task_id_early, job_id_early, history
+        )
         if not task_id_early and not job_id_early and _is_jobs_db_question(question):
             # When multiple databases are registered, ask for clarification
             # if the question does not unambiguously identify one.
