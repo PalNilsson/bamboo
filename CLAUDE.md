@@ -80,7 +80,9 @@ TOOLS = {
     "panda_job_status":     panda_job_status_tool,
     "panda_log_analysis":   panda_log_analysis_tool,
     "panda_pilot_status":   panda_pilot_status_tool,
+    "panda_jobs_query":     panda_jobs_query_tool,     # NL→SQL against ingestion DuckDB
 }
+# panda_jobs_query is conditionally added after the dict if askpanda_atlas is installed.
 ```
 
 ### Routing (`core/bamboo/tools/bamboo_answer.py`)
@@ -93,15 +95,18 @@ TOOLS = {
 - **`_resolve_contextual_ids(question, task_id, job_id, history)`** — fills in `task_id`/`job_id` from history for contextual follow-ups when the current question has none of its own. Two detection paths:
   1. **Explicit back-reference**: pronouns/demonstratives (`"those"`, `"them"`, `"that task"`, `"it"`) — always scans history.
   2. **Implicit short follow-up**: ≤ 10 words + status-specific domain term (`"failed"`, `"finished"`, `"running"`, etc.) — only applies the found ID if history actually contains one.
-- **`_build_deterministic_plan(rag_query, task_id, job_id)`** — fast-path routing without an LLM call: job ID + analysis keywords → `panda_log_analysis`; job ID → `panda_job_status`; task ID → `panda_task_status`; no IDs → RAG retrieval.
+- **`_build_deterministic_plan(rag_query, task_id, job_id)`** — fast-path routing without an LLM call: job ID + analysis keywords → `panda_log_analysis`; job ID → `panda_job_status`; task ID → `panda_task_status`; jobs DB signals (no IDs) → `panda_jobs_query`; no IDs → RAG retrieval.
+- **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases (`"failed at"`, `"top errors"`, `"each status"`, `"which queues"`, `"last updated"`, etc.) and no `"task"` keyword. Used by the fast-path intercept to skip the topic guard for clearly on-topic DB queries.
+- **`QUERYABLE_DATABASES`** — registry of queryable databases (`{"jobs": "...", ...}`). Currently one entry; add `"cric"` when CRIC integration lands. When more than one entry is present, `_resolve_target_database()` is called to detect ambiguous questions; `_build_clarification_response()` prompts the user to specify which database they mean.
 
 Routing order in `_route()`:
 1. `bypass_routing` → direct LLM passthrough
 2. Social intercept (greeting / ack)
-3. Topic guard + content-free followup reformulation
-4. ID extraction from question, then contextual ID resolution from history
-5. Deterministic fast-path plan
-6. LLM planner fallback (`bamboo_plan` with `execute=True`)
+3. **Jobs DB fast-path intercept** — contextual ID resolution from history runs first; if no ID found and `_is_jobs_db_question()` matches, the topic guard is skipped entirely and the question routes directly to `panda_jobs_query`. Saves ~3s per query.
+4. Topic guard + content-free followup reformulation
+5. ID extraction from question, then contextual ID resolution from history
+6. Deterministic fast-path plan
+7. LLM planner fallback (`bamboo_plan` with `execute=True`)
 
 ### Execution (`core/bamboo/tools/bamboo_executor.py`)
 
@@ -109,6 +114,7 @@ Routing order in `_route()`:
 
 - After each successful tool call, the full evidence dict (including `raw_payload`) is stored in `_last_evidence_store[tool_name]`. `raw_payload` is **stripped before synthesis** so the LLM only sees the compact evidence fields.
 - `BambooLastEvidenceTool` (`bamboo_last_evidence`) exposes the store via MCP. Accepts `mode="evidence"` (compact dict, `raw_payload` excluded) or `mode="raw"` (verbatim BigPanDA API response). Used by the TUI `/inspect` and `/json` commands.
+- `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_jobs_query` → jobs DB prompt (explicitly tells the LLM that `"error": null` means success); `panda_doc_*` → RAG documentation; other → generic.
 
 ### LLM Passthrough (`core/bamboo/tools/llm_passthrough.py`)
 
@@ -126,6 +132,7 @@ Tools are registered via `pyproject.toml` entry points under `bamboo.tools`:
 [project.entry-points."bamboo.tools"]
 "atlas.task_status" = "askpanda_atlas.task_status:panda_task_status_tool"
 "atlas.ui_manifest" = "askpanda_atlas.ui_manifest:atlas_ui_manifest_tool"
+"atlas.jobs_query"  = "askpanda_atlas.jobs_query:panda_jobs_query_tool"
 ```
 
 Each plugin is a separate installable package under `packages/`. Core discovers plugins at startup via `importlib.metadata.entry_points`. The `TOOLS` dict keys (e.g. `"panda_task_status"`) are internal identifiers; MCP-exposed names come from `get_definition()["name"]`.
@@ -157,6 +164,21 @@ All `bamboo.tools.base` imports are deferred inside `call()` — never at module
 - `PandaJob` — wraps a raw job dict. Exposes typed properties (`pandaid`, `jobstatus`, `computingsite`, `piloterrorcode`, `jeditaskid`, etc.).
 - `PandaTaskData` — wraps the full jobs-endpoint payload. Exposes `jobs: list[PandaJob]`, `selectionsummary`, `errsByCount`.
 - `build_evidence(task)` — produces the compact evidence dict sent to the LLM: `jobs_by_status`, `jobs_by_site`, `jobs_by_piloterrorcode`, `failed_jobs_sample` (≤ 20), `finished_jobs_sample` (≤ 5), `task_summary`, and `pandaid_list` (inlined only when ≤ 500 jobs).
+
+#### Jobs Query (`jobs_query_impl.py`, `jobs_query_schema.py`)
+
+NL→SQL tool that queries the local ingestion DuckDB file written by the `askpanda-ingestion-agent`. See `docs/jobs-database.md` for full documentation.
+
+Pipeline: schema context (cached, 1 h TTL) → LLM SQL generation (temperature 0.0, max 512 tokens) → fence-strip → cannot-answer detection → AST guard (`sqlglot`, DuckDB dialect) → synchronous DuckDB execution → evidence dict.
+
+Key design decisions:
+- **AST guard** (`validate_and_guard`) enforces 7 rules: single statement, SELECT-only root, no DDL/DML/DCL/TCL anywhere in the tree, no system tables, no unknown tables (allow-list: `jobs`, `selectionsummary`, `errors_by_count`), LIMIT injection. Implemented with `sqlglot` AST inspection — never regex.
+- **Synchronous execution** — DuckDB queries run on the event loop thread (2-15 ms typical). `asyncio.to_thread` was deliberately removed after macOS threading conflicts were diagnosed.
+- **Datetime serialisation** — `_serialise_row()` converts `datetime`, `date`, and `Decimal` values to JSON-safe types before the evidence dict is serialised.
+- **No bamboo-core import at module level** — `bamboo.llm.*` imports are deferred inside `_call_llm_for_sql()` so the module is importable without bamboo installed.
+- `PANDA_DUCKDB_PATH` env var (default: `jobs.duckdb`) controls the database path.
+
+Schema context and SQL generation prompt live in `jobs_query_schema.py`. The prompt includes six few-shot examples covering freshness queries, counts, group-by, errors, cross-queue ranking, and job listing.
 
 #### Log Analysis (`log_analysis_impl.py`)
 

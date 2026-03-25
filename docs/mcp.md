@@ -49,17 +49,25 @@ mechanisms, tried in order:
 
 **Deterministic routing** — `_build_deterministic_plan()` inspects the
 question for a task ID, a job ID, or failure-analysis keywords using regex
-patterns.  This produces a `Plan` object covering four cases:
+patterns.  This produces a `Plan` object covering five cases:
 
 | Question contains | Tool called | Route |
 |---|---|---|
 | job ID + failure keywords (analyse, why, fail, log…) | `panda_log_analysis` | `FAST_PATH` |
 | job ID (no task ID) | `panda_job_status` | `FAST_PATH` |
 | task ID | `panda_task_status` | `FAST_PATH` |
+| jobs DB signals, no IDs | `panda_jobs_query` | `FAST_PATH` |
 | neither | `panda_doc_search` + `panda_doc_bm25` | `RETRIEVE` |
 
 **No LLM is involved here.** This covers the overwhelming majority of
 questions with zero routing cost.
+
+Questions with jobs DB signal phrases (e.g. `"failed at BNL"`, `"top errors
+at SWT2_CPB"`, `"each status"`, `"last updated"`) bypass the topic guard
+entirely — they are self-evidently on-topic and the guard LLM call would add
+~3 s with no benefit.  Contextual ID resolution from history runs first so
+that pronouns like `"how many of those failed?"` (which match `"failed"` but
+refer to a task in history) still route to `panda_task_status`.
 
 **LLM planner fallback** — if the deterministic step cannot produce a plan
 (currently reserved for future multi-step questions), `bamboo_plan` is called.
@@ -227,6 +235,7 @@ combination of IDs and keywords builds a `Plan` object with no LLM call:
 | job_id + analysis keywords | `FAST_PATH` | `panda_log_analysis` |
 | job_id only (no task_id) | `FAST_PATH` | `panda_job_status` |
 | task_id | `FAST_PATH` | `panda_task_status` |
+| jobs DB signals, no IDs | `FAST_PATH` | `panda_jobs_query` |
 | no ID | `RETRIEVE` | `panda_doc_search` (top_k=5) + `panda_doc_bm25` (top_k=5) |
 
 This covers all common questions with **zero LLM cost**.
@@ -265,6 +274,7 @@ selected by `_pick_synthesis_prompt()` based on which tools ran:
 | `panda_log_analysis` | Log-analysis diagnostic prompt |
 | `panda_job_status` | Job-status summary prompt |
 | `panda_task_status` | Task-metadata summary prompt |
+| `panda_jobs_query` | Jobs DB prompt (explicitly tells the LLM `"error": null` means success) |
 | `panda_doc_search` or `panda_doc_bm25` | RAG documentation prompt |
 | other / mixed | Generic multi-tool prompt |
 
