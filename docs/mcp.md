@@ -207,7 +207,11 @@ serves both:
 
 `bamboo_answer` is the primary entry point for both UIs.  It accepts
 `question` (string), `messages` (full chat history for multi-turn context),
-and `bypass_routing` (flag to skip routing and go directly to the LLM).
+and `bypass_routing` (flag to skip routing and go directly to the LLM),
+and `bypass_fast_path` (flag to skip only the deterministic fast-path
+intercepts and `_build_deterministic_plan`, falling through to the topic
+guard and LLM planner — useful for testing planner routing on questions that
+would normally be short-circuited).  Exposed as the TUI `/fastpath off` command.
 
 **Step 1 — Argument validation** (in `core.py`, before dispatch)
 
@@ -314,6 +318,10 @@ The planner system prompt includes routing guidance:
 - task ID present → `panda_task_status`
 - job ID + failure keywords → `panda_log_analysis`
 - job ID alone → `panda_job_status`
+- **pilot AND job signals** at a site → `panda_harvester_workers` + `panda_jobs_query` together (pass `site=` and `queue=`)
+- **pilot signals only** → `panda_harvester_workers`
+- **job/failure signals only** → `panda_jobs_query`
+- **queue configuration** → `panda_queue_info`
 - all other questions → `panda_doc_search` + `panda_doc_bm25` (always
   retrieve first; never answer general knowledge questions from parametric
   memory alone)
@@ -324,6 +332,11 @@ from routing general questions to the raw LLM passthrough.
 The planner validates output against the `Plan` Pydantic model and performs
 at most one repair attempt.  If both attempts fail, a structured error is
 returned (not raised).
+
+Each planner LLM call now emits an `llm_call` trace span with
+`tool="bamboo_plan"`, so token counts appear correctly in the TUI `/costs`
+output when the planner is active (i.e. when `/fastpath off` is set or for
+questions that bypass the deterministic fast-path).
 
 The authoritative plan schema:
 

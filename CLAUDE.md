@@ -98,11 +98,15 @@ TOOLS = {
   2. **Implicit short follow-up**: ≤ 10 words + status-specific domain term (`"failed"`, `"finished"`, `"running"`, etc.) — only applies the found ID if history actually contains one.
 - **`_build_deterministic_plan(rag_query, task_id, job_id)`** — fast-path routing without an LLM call: job ID + analysis keywords → `panda_log_analysis`; job ID → `panda_job_status`; task ID → `panda_task_status`; pilot/Harvester signals (no IDs) → `panda_harvester_workers`; jobs DB signals (no IDs) → `panda_jobs_query`; no IDs → RAG retrieval. The pilot rule runs before the jobs DB rule because the word "pilot" can co-occur with jobs DB signal phrases.
 - **`_is_pilot_question(question)`** — returns `True` when the question contains pilot/Harvester signal phrases (`"pilot"`, `"pilots"`, `"harvester worker"`, `"nworkers"`, `"pilot count"`, etc.) regardless of site or time expression. Used by the pilot fast-path intercept to bypass the topic guard for clearly on-topic pilot queries.
-- **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases and no `"task"` keyword.
-- **`_is_site_health_question(question)`** — returns `True` when the question contains signals from **both** `_PILOT_SIGNALS` and `_JOBS_DB_SPECIFIC_SIGNALS` (a job-specific subset that excludes generic phrases like "how many" to avoid false positives). These questions route to both `panda_harvester_workers` and `panda_jobs_query` in a single plan, checked in `_run_fast_path_intercepts` before the individual pilot/jobs checks.
-- **`_JOBS_DB_SPECIFIC_SIGNALS`** — the job-specific subset of `_JOBS_DB_SIGNALS` used by `_is_site_health_question`. Excludes generic counting phrases and status-at phrases that can appear in pure pilot questions.
-- **`_extract_site_from_question(question)`** — returns the first known ATLAS site name found in the question (BNL, CERN, AGLT2, SLAC, etc.), or `None` to query all sites.
+- **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases (`"failed at"`, `"top errors"`, `"each status"`, `"which queues"`, `"last updated"`, etc.) and no `"task"` keyword. Used by the fast-path intercept to skip the topic guard for clearly on-topic DB queries.
+- **`_is_site_health_question(question)`** — returns `True` when the question contains signals from **both** `_PILOT_SIGNALS` and either `_JOBS_DB_SPECIFIC_SIGNALS` or any bare occurrence of the word `"job"` / `"jobs"` (matched with word boundaries via `re.search(r"\bjobs?\b", q)`). The word-boundary check handles natural phrasing like `"pilot and job failure rates"` without false-positives on `"how many pilots?"`. Questions with a `"task"` keyword are excluded.
+- **`_JOBS_DB_SPECIFIC_SIGNALS`** — the job-specific subset of `_JOBS_DB_SIGNALS` used by `_is_site_health_question`. Excludes generic counting phrases (`"how many"`, `"count"`) and status-at phrases (`"ran at"`, `"failed at"`) that can appear in pure pilot questions.
+- **`_extract_site_from_question(question)`** — extracts a computing site name using two strategies: (1) a contextual regex matching tokens after `at/for/from/site/queue` that filters out stop-words and requires the token to look like an ATLAS site (has digit, separator char, or is all-uppercase); (2) a short fallback list for sites used without a preposition. Handles arbitrary site names like MWT2, SLAC-SCS, CERN\_PROD, SWT2\_CPB without requiring them to be pre-registered.
 - **`_extract_time_window_from_question(question)`** — translates natural-language temporal expressions into explicit ISO-8601 `(from_dt, to_dt)` pairs (UTC). Handles: `"last/past N hours/minutes/days"`, `"yesterday"`, `"since yesterday"`, `"today"`, explicit `"between ISO and ISO"` ranges. Returns `None` for `"right now"` / `"currently"` / no temporal expression, in which case the tool defaults to the last hour.
+
+The **site-health fast-path** (in `_run_fast_path_intercepts`) builds a two-tool plan passing `site=<SITE>` to `panda_harvester_workers` **and** `queue=<SITE>` to `panda_jobs_query`. Both arguments are required for the tools to scope their queries to the same site; omitting `queue=` causes `panda_jobs_query` to query globally and return incorrect (all-site) statistics.
+
+`bamboo_answer` accepts a `bypass_fast_path: bool` argument (default `False`). When `True`, both `_run_fast_path_intercepts()` and `_build_deterministic_plan()` are skipped — the question falls through to the topic guard and LLM planner. Exposed via the TUI `/fastpath off` command for testing planner routing on questions that would normally be short-circuited.
 - **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases (`"failed at"`, `"top errors"`, `"each status"`, `"which queues"`, `"last updated"`, etc.) and no `"task"` keyword. Used by the fast-path intercept to skip the topic guard for clearly on-topic DB queries.
 - **`QUERYABLE_DATABASES`** — registry of queryable databases (`{"jobs": "...", ...}`). Currently one entry; add `"cric"` when CRIC integration lands. When more than one entry is present, `_resolve_target_database()` is called to detect ambiguous questions; `_build_clarification_response()` prompts the user to specify which database they mean.
 
@@ -242,6 +246,8 @@ Entry point registration in `pyproject.toml`:
 | `/history` | Conversation turns in context memory |
 | `/plugin <id>` | Switch active plugin |
 | `/debug on\|off` | Toggle tool call + raw result display |
+| `/fastpath on\|off` | Toggle deterministic fast-path routing. `off` bypasses all fast-path intercepts and `_build_deterministic_plan`, forcing the LLM planner to handle all routing. Useful for testing planner coverage on questions that would normally be short-circuited. Default: `on`. |
+| `/costs` | Show estimated LLM token cost for the last request, broken down by model call. Reads `input_tokens`/`output_tokens` from `llm_call` trace spans and prices them from `_MODEL_COST_PER_MTOK`. Requires `BAMBOO_TRACE=1`. |
 | `/clear` | Clear transcript, context memory, and HTTP cache |
 | `/exit`, `/quit` | Exit |
 
@@ -261,6 +267,14 @@ Connected via stdio. Answer tool: bamboo_answer.
 `_write_thinking()` uses `self.set_interval(1.0, _tick)` (Textual-native timer) to cycle `Thinking.` → `Thinking..` → `Thinking...` with the current wall-clock time (`datetime.datetime.now().strftime("%H:%M:%S")`) updated each frame. Cancelled via `timer.stop()` in `_replace_thinking()`.
 
 `asyncio.ensure_future` + `asyncio.sleep` was deliberately avoided — it caused 60× speed issues when the Textual event loop competed with blocking MCP worker threads.
+
+#### Cost Estimation (`/costs`)
+
+`_estimate_cost(spans)` reads every `llm_call` span from `_last_spans`, looks up per-token pricing from `_MODEL_COST_PER_MTOK` (a `Dict[str, tuple]` of `(input_rate_per_Mtok, output_rate_per_Mtok)` in USD), and returns a breakdown dict. Unknown models fall back to `_DEFAULT_COST_PER_MTOK` ($1.00/$3.00 per Mtok) and are flagged in the output.
+
+The pricing table covers Mistral, Anthropic, OpenAI, and Google models. To add a new model, extend `_MODEL_COST_PER_MTOK` in `interfaces/textual/chat.py` — no restart needed as the dict is read at command time.
+
+**Important**: the planner (`bamboo_plan`) previously emitted no trace spans, so its token usage was invisible to `/costs`. It now emits an `llm_call` span with `tool="bamboo_plan"`, so `/fastpath off` queries correctly show two LLM call rows — the planning call and the synthesis call.
 
 ## Key Conventions
 
