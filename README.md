@@ -88,9 +88,11 @@ Type any question and press Enter.
 | `/task <id>` | Shorthand for "summarise task \<id\>" |
 | `/job <id>` | Shorthand for "analyse failure of job \<id\>" |
 | `/tracing` | Show timing and trace spans for the last request |
+| `/costs` | Show estimated LLM token cost for the last request |
 | `/json` | Show raw BigPanDA JSON for the last query |
 | `/inspect` | Show compact evidence dict (what the LLM saw) for the last query |
 | `/history` | Show turns currently held in context memory |
+| `/fastpath on\|off` | Toggle deterministic fast-path routing (off → use LLM planner) |
 | `/debug on\|off` | Toggle verbose tool call output |
 | `/tools` | List tools registered on the server |
 | `/clear` | Clear transcript, context memory, and HTTP cache |
@@ -98,6 +100,8 @@ Type any question and press Enter.
 
 `PageUp`/`PageDown` to scroll · `Ctrl+Q` to quit ·
 Hold **Option** (macOS) or **Shift** (Linux/Windows) to select text with the mouse.
+
+See [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) for ready-to-paste test questions.
 
 ---
 
@@ -138,6 +142,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | [`docs/rag.md`](docs/rag.md) | RAG pipeline (ChromaDB + BM25) |
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
+| [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions for every tool and routing path |
 
 ---
 
