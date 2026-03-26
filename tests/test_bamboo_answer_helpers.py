@@ -409,9 +409,18 @@ class TestIsImplicitContextualFollowup:
         "Explain the JEDI architecture in detail and how it relates to task scheduling",
         "What are the main components of the PanDA workload management system?",
         "How does the pilot framework interact with the workload management system?",
+        # Fresh pilot questions — must NOT inherit task ID even though short
+        # and containing domain words like "running"
+        "How many pilots are running at BNL right now",
+        "How many pilots are running at MWT2?",
+        "How many pilots are idle?",
+        "How many pilots are running right now?",
+        # Fresh site-scoped job questions
+        "How many jobs failed at AGLT2?",
+        "What are the pilot and job failure rates at BNL?",
     ])
     def test_non_implicit_not_detected(self, text: str) -> None:
-        """Social messages and long doc questions are not matched."""
+        """Social messages, long doc questions, and fresh site/pilot questions are not matched."""
         assert not _is_implicit_contextual_followup(text), f"Expected no match for: {text!r}"
 
 

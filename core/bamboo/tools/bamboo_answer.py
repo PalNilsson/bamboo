@@ -870,7 +870,8 @@ _DOMAIN_WORD_RE = re.compile(
     r"activated|activat(?:ed|ing)|"
     r"piloterror(?:code|diag)|"
     r"error\s+code|error\s+codes|"
-    r"how\s+many\s+(?:jobs?|are|were|did)|"
+    r"top\s+errors?|"
+    r"how\s+many\s+(?:jobs?|are|were|did|errors?)|"
     r"which\s+sites?|"
     r"any\s+(?:errors?|failures?)"
     r")\b",
@@ -929,6 +930,16 @@ def _is_implicit_contextual_followup(question: str) -> bool:
     of a previously discussed task or job.  Always called *after* confirming
     that history contains a recent task/job ID.
 
+    Returns ``False`` immediately when the question contains unambiguous
+    routing signals of its own — pilot phrases, a recognisable site name, or
+    jobs-DB signal phrases.  Those questions are self-contained fresh queries
+    that must not inherit a task/job ID from history even if they happen to
+    be short and contain domain words like ``"running"`` or ``"failed"``.
+
+    Example of the false-positive this guards against: after a task query,
+    ``"How many pilots are running at BNL right now?"`` (9 words, contains
+    ``"running"``) must *not* inherit the prior task ID.
+
     Args:
         question: The user's question text (caller has verified no ID present).
 
@@ -939,6 +950,22 @@ def _is_implicit_contextual_followup(question: str) -> bool:
     q = question.strip()
     if not q:
         return False
+
+    # Exclude questions that are self-contained fresh queries about pilots,
+    # site health, live job statistics, or any named computing site.
+    # For pilot and site-health questions, any mention of pilots is
+    # unambiguous enough to exclude even without a site name.
+    # For jobs-DB questions, only exclude when a site is explicitly named —
+    # bare questions like "how many jobs failed?" or "top errors?" are
+    # genuinely ambiguous and may be follow-ups to a task query.
+    if _is_pilot_question(question):
+        return False
+    if _is_site_health_question(question):
+        return False
+    site = _extract_site_from_question(question)
+    if site is not None:
+        return False
+
     word_count = len(q.split())
     return word_count <= _MEDIUM_FOLLOWUP_WORD_LIMIT and bool(_DOMAIN_WORD_RE.search(q))
 

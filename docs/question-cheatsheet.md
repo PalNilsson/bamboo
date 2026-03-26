@@ -167,9 +167,9 @@ Test context memory and pronoun resolution across turns.
 
 ```
 # Turn 1
-What is the status of task 29871234?
+What is the status of task 49428233?
 
-# Turn 2 (should resolve "it" to task 29871234)
+# Turn 2 (should resolve "it" to task 49428233)
 How many jobs failed in it?
 
 # Turn 3
