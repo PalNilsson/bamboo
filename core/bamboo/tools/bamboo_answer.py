@@ -37,14 +37,26 @@ from bamboo.tools.planner import (
 from bamboo.tools.topic_guard import check_topic
 from bamboo.tracing import EVENT_GUARD, span
 
-# Matches "task 123", "task:123", "task-123" etc. (4-12 digits)
+# Matches \"task 123\", \"task:123\", \"task-123\" etc. (4-12 digits)
 _TASK_PATTERN = re.compile(r"(?i)\btask[:#/\-\s]+([0-9]{4,12})\b")
-# Matches "job 123", "job:123", "pandaid 123", "panda id 123" etc.
+# Matches \"job 123\", \"job:123\", \"pandaid 123\", \"panda id 123\" etc.
 _JOB_PATTERN = re.compile(r"(?i)\b(?:job|pandaid|panda[\s_-]?id)[:#/\-\s]+([0-9]{4,12})\b")
-# Matches "analyse/analyze/why did ... job 123 fail"
+# Matches \"analyse/analyze/why did ... job 123 fail\"
 _LOG_PATTERN = re.compile(
     r"(?i)(?:analyz?e|analys[ei]|why|fail|log|diagnos)[^.]{0,60}"
     r"\bjob[:#/\-\s]+([0-9]{4,12})\b"
+)
+# Matches PanDA server liveness questions — \"is panda alive\", \"is the panda server ok\", etc.
+# Deliberately avoids matching task/job/site questions that mention \"panda\" incidentally.
+_PANDA_HEALTH_RE: re.Pattern[str] = re.compile(
+    r"(?i)"
+    r"(?:"
+    r"is\s+(?:the\s+)?panda\s+(?:server\s+)?(?:alive|ok(?:ay)?|up|running|fine|healthy)"
+    r"|panda\s+(?:server\s+)?(?:alive|ok(?:ay)?|up|running|status|health)"
+    r"|(?:server|panda)\s+(?:liveness|heartbeat)"
+    r"|is\s+panda\s+(?:server\s+)?(?:down|available|reachable|responding)"
+    r"|panda\s+server\s+check"
+    r")"
 )
 
 # ---------------------------------------------------------------------------
@@ -110,6 +122,22 @@ def _is_ack(text: str) -> bool:
         True when the entire message matches a common acknowledgement pattern.
     """
     return bool(_ACK_RE.match(text.strip()))
+
+
+def _is_panda_health_question(text: str) -> bool:
+    """Return True if *text* is asking about PanDA server liveness or health.
+
+    Matches phrases such as "Is the PanDA server alive?", "Is PanDA OK?",
+    "PanDA server status", or "Is PanDA up?".  Deliberately avoids matching
+    incidental mentions of "panda" in task, job, or site questions.
+
+    Args:
+        text: The raw user message string.
+
+    Returns:
+        True when the message is a PanDA server health/liveness query.
+    """
+    return bool(_PANDA_HEALTH_RE.search(text.strip()))
 
 
 def _extract_task_id(text: str) -> int | None:
@@ -1120,14 +1148,15 @@ async def _run_fast_path_intercepts(
     Performs early contextual ID resolution and, when no ID is present,
     checks for unambiguous signal phrases in priority order:
 
-    1. **Site health** — both pilot AND jobs signals present → calls
+    1. **PanDA server health** — liveness/health question → ``panda_server_health``.
+    2. **Site health** — both pilot AND jobs signals present → calls
        ``panda_harvester_workers`` + ``panda_jobs_query`` in one plan.
-    2. **Pilot only** → ``panda_harvester_workers``.
-    3. **Jobs DB only** → ``panda_jobs_query``.
+    3. **Pilot only** → ``panda_harvester_workers``.
+    4. **Jobs DB only** → ``panda_jobs_query``.
 
-    The combined check must come first because a site-health question
-    would otherwise be captured by the pilot-only check and the jobs
-    data would never be fetched.
+    The PanDA health check fires first so "is PanDA alive?" is never
+    confused with a site-health or jobs question.  The combined site-health
+    check must come before the pilot-only check so both tools are called.
 
     Returns the synthesised answer when a fast-path fires, or ``None``
     when no intercept matches and normal routing should continue.
@@ -1146,6 +1175,25 @@ async def _run_fast_path_intercepts(
     )
 
     if not task_id_early and not job_id_early:
+        # PanDA server health fast-path — highest priority before site/pilot/jobs.
+        if _is_panda_health_question(question):
+            plan = Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=0.97,
+                tool_calls=[
+                    ToolCall(
+                        tool="panda_server_health",
+                        arguments={"query": question},
+                    ),
+                ],
+                reuse_policy=ReusePolicy(),
+                explain=(
+                    "Deterministic: PanDA server liveness question "
+                    "→ panda_server_health."
+                ),
+            )
+            return await execute_plan(plan, question, history)
+
         # Combined site-health fast-path — must be checked before the
         # individual pilot/jobs checks so both tools are called.
         if _is_site_health_question(question):
@@ -1423,6 +1471,7 @@ __all__ = [
     "_is_jobs_db_question",
     "_is_pilot_question",
     "_is_site_health_question",
+    "_is_panda_health_question",
     "_extract_site_from_question",
     "_extract_time_window_from_question",
     "_PILOT_SIGNALS",

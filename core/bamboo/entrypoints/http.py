@@ -67,11 +67,38 @@ _ready: dict[str, asyncio.Event] = {}
 
 _lock = asyncio.Lock()
 
+# PanDA MCP upstream session — established at lifespan startup if
+# PANDA_MCP_BASE_URL is set in the environment.
+_panda_shutdown: asyncio.Event = asyncio.Event()
+_panda_task: asyncio.Task[None] | None = None
+
 # Header names clients may use for session id
 _SESSION_HEADERS = (b"mcp-session-id", b"x-mcp-session-id")
 
 # Authorization header (HTTP)
 _AUTH_HEADER = b"authorization"
+
+
+async def _startup_panda_mcp() -> None:
+    """Start the PanDA MCP upstream session as a background task.
+
+    Called from the ASGI lifespan startup handler.  If ``PANDA_MCP_BASE_URL``
+    is not set, this function is a no-op (the session helper logs a warning).
+    If ``askpanda_atlas`` is not installed the ImportError is silently ignored.
+    """
+    global _panda_task  # pylint: disable=global-statement
+
+    try:
+        from askpanda_atlas.panda_mcp_session import (  # type: ignore[import]
+            run_panda_mcp_session,
+        )
+    except ImportError:
+        return  # askpanda_atlas not installed — PanDA MCP tools unavailable.
+
+    _panda_task = asyncio.create_task(
+        run_panda_mcp_session(_panda_shutdown),
+        name="panda-mcp-session",
+    )
 
 
 async def _shutdown() -> None:
@@ -83,11 +110,14 @@ async def _shutdown() -> None:
     - Cancels all background connect/run tasks.
     - Clears per-session transport state.
     - Closes any shared LLM client manager if present on the server instance.
+    - Signals and awaits the PanDA MCP upstream session task.
 
     The MCP StreamableHTTPServerTransport is held open by the background tasks
     via its `connect()` context manager. Cancelling those tasks is the primary
     mechanism to close transports gracefully.
     """
+    global _panda_task  # pylint: disable=global-statement
+
     # Cancel background tasks first (these own the transport.connect() context).
     tasks = list(_tasks.values())
     for task in tasks:
@@ -117,6 +147,15 @@ async def _shutdown() -> None:
         except Exception:  # pylint: disable=broad-exception-caught
             # If closing fails, ignore - best-effort cleanup.
             pass
+
+    # Tear down the PanDA MCP upstream session.
+    _panda_shutdown.set()
+    if _panda_task is not None:
+        try:
+            await asyncio.wait_for(_panda_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):  # pylint: disable=broad-exception-caught
+            pass
+        _panda_task = None
 
 
 def _get_session_id_from_scope(scope: Scope) -> str | None:
@@ -281,6 +320,7 @@ async def app(scope: Scope, receive: Receive, send: Send) -> None:  # pylint: di
             msg_type = message.get("type")
 
             if msg_type == "lifespan.startup":
+                await _startup_panda_mcp()
                 await send({"type": "lifespan.startup.complete"})
             elif msg_type == "lifespan.shutdown":
                 await _shutdown()

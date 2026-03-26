@@ -63,6 +63,11 @@ async def main() -> None:
     therefore unaffected.
 
     In normal (non-quiet) operation a startup banner is printed to stderr.
+
+    A background ``asyncio.Task`` is started to establish and maintain the
+    PanDA MCP session for the lifetime of the server (controlled by
+    ``PANDA_MCP_BASE_URL``).  If the env var is unset the task exits
+    immediately after logging a warning.
     """
     import os as _os
 
@@ -81,6 +86,20 @@ async def main() -> None:
     else:
         print(f"Bamboo MCP server v{Config.SERVER_VERSION} starting …", file=sys.stderr)
 
+    # Start PanDA MCP session in a background task (no-op if env var unset).
+    panda_shutdown = asyncio.Event()
+    panda_task: asyncio.Task[None] | None = None
+    try:
+        from askpanda_atlas.panda_mcp_session import (  # type: ignore[import]
+            run_panda_mcp_session,
+        )
+        panda_task = asyncio.create_task(
+            run_panda_mcp_session(panda_shutdown),
+            name="panda-mcp-session",
+        )
+    except ImportError:
+        pass  # askpanda_atlas not installed — PanDA MCP tools unavailable.
+
     app: Server = create_server()
     async with stdio_server() as (read_stream, write_stream):
         try:
@@ -91,6 +110,13 @@ async def main() -> None:
             )
         except (asyncio.CancelledError, KeyboardInterrupt):
             return
+        finally:
+            panda_shutdown.set()
+            if panda_task is not None:
+                try:
+                    await asyncio.wait_for(panda_task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):  # pylint: disable=broad-exception-caught
+                    pass
 
 
 if __name__ == "__main__":

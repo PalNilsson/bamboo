@@ -38,6 +38,7 @@ from bamboo.tools.task_status import panda_task_status_tool
 from bamboo.tools.job_status import panda_job_status_tool
 from bamboo.tools.log_analysis import panda_log_analysis_tool
 from askpanda_atlas.harvester_worker import panda_harvester_workers_tool  # type: ignore[import]
+from askpanda_atlas.panda_server_health import panda_server_health_tool  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Tool registry — mirrors bamboo.core.TOOLS without importing core.py
@@ -55,6 +56,7 @@ TOOLS: dict[str, Any] = {
     "panda_job_status": panda_job_status_tool,
     "panda_log_analysis": panda_log_analysis_tool,
     "panda_harvester_workers": panda_harvester_workers_tool,
+    "panda_server_health": panda_server_health_tool,
 }
 
 _TOOL_NAMES: list[str] = sorted(TOOLS.keys())
@@ -105,6 +107,7 @@ _STUB_ARGS: dict[str, dict[str, Any]] = {
     "panda_job_status": {"job_id": 1},
     "panda_log_analysis": {"job_id": 1},
     "panda_harvester_workers": {"question": "How many pilots are running at BNL?"},
+    "panda_server_health": {"query": "Is the PanDA server alive?"},
 }
 
 # ---------------------------------------------------------------------------
@@ -329,7 +332,7 @@ async def test_tool_call_returns_mcp_content_list(tool_name: str) -> None:
 # Evidence tools: JSON round-trip verification
 # ---------------------------------------------------------------------------
 
-_EVIDENCE_TOOLS = ["panda_task_status", "panda_job_status", "panda_log_analysis"]
+_EVIDENCE_TOOLS = ["panda_task_status", "panda_job_status", "panda_log_analysis", "panda_server_health"]
 
 
 @pytest.mark.asyncio

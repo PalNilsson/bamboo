@@ -198,6 +198,24 @@ _SYSTEM_SITE_HEALTH: str = (
     "the user asked for detail.\n"
 )
 
+_SYSTEM_PANDA_HEALTH: str = (
+    "You are AskPanDA, an expert assistant for the PanDA workload management "
+    "system and ATLAS experiment workflows at CERN.\n"
+    "You have called the PanDA server liveness check (is_alive).\n"
+    "The evidence contains:\n"
+    "- is_alive: true if the server is alive and responding, false otherwise.\n"
+    "- raw_response: the raw string returned by the PanDA MCP is_alive tool.\n"
+    "- error: null on success; an error string if the MCP server could not be reached.\n"
+    "Rules:\n"
+    "- If error is non-null: report that the PanDA MCP server could not be reached "
+    "and include the error message.\n"
+    "- If is_alive is true: confirm the PanDA server is alive and responding. "
+    "Include any useful detail from raw_response.\n"
+    "- If is_alive is false: report that the PanDA server does not appear to be alive "
+    "and include raw_response so the user can investigate.\n"
+    "- Be concise — one or two sentences is enough.\n"
+)
+
 # ---------------------------------------------------------------------------
 # RAG helpers (moved from bamboo_answer.py)
 # ---------------------------------------------------------------------------
@@ -453,6 +471,8 @@ def _pick_synthesis_prompt(tool_names: list[str]) -> str:
         return _SYSTEM_JOB
     if "panda_task_status" in tool_names:
         return _SYSTEM_TASK
+    if "panda_server_health" in tool_names:
+        return _SYSTEM_PANDA_HEALTH
     # Combined site-health: both harvester and jobs query in the same plan.
     if "panda_harvester_workers" in tool_names and "panda_jobs_query" in tool_names:
         return _SYSTEM_SITE_HEALTH
@@ -705,6 +725,7 @@ __all__ = [
     "_SYSTEM_JOBS_QUERY",
     "_SYSTEM_HARVESTER_WORKERS",
     "_SYSTEM_SITE_HEALTH",
+    "_SYSTEM_PANDA_HEALTH",
     "bamboo_last_evidence_tool",
 ]
 

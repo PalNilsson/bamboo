@@ -81,9 +81,10 @@ TOOLS = {
     "panda_log_analysis":      panda_log_analysis_tool,
     "panda_jobs_query":        panda_jobs_query_tool,     # NL→SQL against ingestion DuckDB
     "panda_harvester_workers": panda_harvester_workers_tool, # Harvester pilot/worker stats
+    "panda_server_health":     panda_server_health_tool,  # PanDA server liveness via PanDA MCP
 }
-# panda_jobs_query and panda_harvester_workers are conditionally added after
-# the dict if askpanda_atlas is installed.
+# panda_jobs_query, panda_harvester_workers, and panda_server_health are
+# conditionally added after the dict if askpanda_atlas is installed.
 ```
 
 ### Routing (`core/bamboo/tools/bamboo_answer.py`)
@@ -114,9 +115,10 @@ Routing order in `_route()`:
 1. `bypass_routing` → direct LLM passthrough
 2. Social intercept (greeting / ack)
 3. **Fast-path intercepts** (`_run_fast_path_intercepts`) — contextual ID resolution first, then:
+   - **PanDA server health** — liveness/health question (no IDs) → `panda_server_health`. Checked first, before site-health, so "is PanDA alive?" is never mistaken for a job or site question.
    - **Site-health** — both pilot AND job-specific signals present → `panda_harvester_workers` + `panda_jobs_query` in one plan. Checked before individual pilot/jobs to prevent the pilot check from firing alone.
    - **Pilot-only** — pilot signals, no job signals → `panda_harvester_workers`.
-   - **Jobs DB** — jobs DB signals → `panda_jobs_query`. All three bypass the topic guard (~3s saved).
+   - **Jobs DB** — jobs DB signals → `panda_jobs_query`. All four bypass the topic guard (~3s saved).
 4. Topic guard + content-free followup reformulation
 5. ID extraction from question, then contextual ID resolution from history
 6. Deterministic fast-path plan
@@ -128,7 +130,7 @@ Routing order in `_route()`:
 
 - After each successful tool call, the full evidence dict (including `raw_payload`) is stored in `_last_evidence_store[tool_name]`. `raw_payload` is **stripped before synthesis** so the LLM only sees the compact evidence fields.
 - `BambooLastEvidenceTool` (`bamboo_last_evidence`) exposes the store via MCP. Accepts `mode="evidence"` (compact dict, `raw_payload` excluded) or `mode="raw"` (verbatim BigPanDA API response). Used by the TUI `/inspect` and `/json` commands.
-- `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_harvester_workers` + `panda_jobs_query` together → site-health prompt (two labelled evidence sources); `panda_harvester_workers` alone → pilot stats prompt; `panda_jobs_query` alone → jobs DB prompt; `panda_doc_*` → RAG documentation; other → generic.
+- `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_server_health` → PanDA liveness prompt; `panda_harvester_workers` + `panda_jobs_query` together → site-health prompt (two labelled evidence sources); `panda_harvester_workers` alone → pilot stats prompt; `panda_jobs_query` alone → jobs DB prompt; `panda_doc_*` → RAG documentation; other → generic.
 
 ### LLM Passthrough (`core/bamboo/tools/llm_passthrough.py`)
 
@@ -276,6 +278,56 @@ The pricing table covers Mistral, Anthropic, OpenAI, and Google models. To add a
 
 **Important**: the planner (`bamboo_plan`) previously emitted no trace spans, so its token usage was invisible to `/costs`. It now emits an `llm_call` span with `tool="bamboo_plan"`, so `/fastpath off` queries correctly show two LLM call rows — the planning call and the synthesis call.
 
+### PanDA MCP Integration (`packages/askpanda_atlas/`)
+
+#### Session Wiring (`panda_mcp_session.py`)
+
+Bamboo connects to the external PanDA MCP server at startup and holds the session open for the process lifetime. The session is registered with the process-wide `MCPCaller` under the name `"panda"`.
+
+**Startup:**
+- `core/bamboo/server.py` (stdio): `asyncio.create_task(run_panda_mcp_session(shutdown_event))` before entering `stdio_server()`.
+- `core/bamboo/entrypoints/http.py` (ASGI): `_startup_panda_mcp()` is called from the `lifespan.startup` handler; teardown is wired into `_shutdown()`.
+
+If `PANDA_MCP_BASE_URL` is not set, the session helper logs a warning and exits immediately — tools that need it return a graceful `"server not connected"` error rather than crashing.
+
+Transport selection: `streamable_http_client` by default; `sse_client` when `PANDA_MCP_USE_SSE=1`.
+
+Authentication is passed as HTTP headers (`Authorization: Bearer <token>` and `Origin: <vo>`), matching the PanDA Server authentication model described in the PandaMCP documentation.
+
+#### PanDA Server Health (`panda_server_health.py`)
+
+Calls the `is_alive` tool on the `"panda"` MCP session. The first (and currently only) tool that delegates to the PanDA MCP server.
+
+Evidence structure:
+- `is_alive: bool` — true if the server is alive.
+- `raw_response: str | None` — first 500 chars of the raw response.
+- `error: str | None` — null on success.
+
+The `_parse_alive(raw)` helper handles plain-string (`"True"` / `"false"`) and JSON (`{"alive": true}`) responses.
+
+**Mocking pattern** (important — differs from other tools):
+
+Because `get_mcp_caller` is imported **inside `call()` at runtime** (required by the no-bamboo-core-at-module-level rule), it cannot be patched via `monkeypatch.setattr("askpanda_atlas.panda_server_health.get_mcp_caller", ...)`. Instead, patch the process-wide singleton directly:
+
+```python
+monkeypatch.setattr(
+    "bamboo.tools._mcp_caller._mcp_caller",
+    _make_caller(text="True"),
+)
+```
+
+The same pattern applies to any future PanDA MCP tool that uses deferred imports.
+
+#### Adding More PanDA MCP Tools
+
+The session wiring is complete — adding a new PanDA MCP tool only requires steps 3–5 from the original plan:
+
+1. Create `packages/askpanda_atlas/askpanda_atlas/panda_mcp_<toolname>.py` following `panda_server_health.py` exactly.
+2. Use `_SERVER = "panda"` and `_TOOL = "<actual_tool_name_on_server>"`.
+3. Register in `pyproject.toml` entry points, `core.py` TOOLS dict, `bamboo_answer.py` fast-path, `bamboo_executor.py` synthesis prompt, `planner.py` routing rule.
+4. Add to `test_narrow_waist.py` TOOLS and `_STUB_ARGS`.
+5. Write `tests/test_panda_mcp_<toolname>.py`.
+
 ## Key Conventions
 
 ### Code Quality
@@ -334,3 +386,7 @@ with patch("askpanda_atlas._cache.cached_fetch_jsonish",
 | `BAMBOO_TRACE` | `1` to enable structured tracing (default: off) |
 | `BAMBOO_TRACE_FILE` | Write trace spans to this file instead of stderr |
 | `BAMBOO_HISTORY_TURNS` | Max conversation turns held in context (default: 10) |
+| `PANDA_MCP_BASE_URL` | Full URL of the PanDA MCP HTTP endpoint, e.g. `http://pandaserver01.sdcc.bnl.gov:25080/mcp/`. If unset, PanDA MCP tools return a graceful "server not connected" error. |
+| `PANDA_MCP_TOKEN` | Optional bearer token sent as `Authorization: Bearer <token>` to the PanDA MCP server |
+| `PANDA_MCP_ORIGIN` | Optional VO name sent as `Origin: <vo>` (e.g. `atlas`) to the PanDA MCP server |
+| `PANDA_MCP_USE_SSE` | `1`/`true`/`yes` to use the legacy SSE transport; default is streamable-HTTP |

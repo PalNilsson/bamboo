@@ -123,6 +123,30 @@ Pilot health and job status at IN2P3-CC.
 
 ---
 
+## PanDA server health (`panda_server_health`)
+
+Questions about whether the PanDA server itself is alive and responding.
+Requires `PANDA_MCP_BASE_URL` to be set; returns a graceful error if not.
+
+```
+Is the PanDA server alive?
+Is PanDA OK?
+Is the PanDA server up?
+Is PanDA running?
+What is the PanDA server status?
+PanDA server health check.
+Is PanDA available?
+Is PanDA responding?
+Is PanDA down?
+```
+
+> **Expected routing:** `route=FAST_PATH`, tool = `panda_server_health` — no topic guard, no LLM planning call.
+> **Evidence keys:** `is_alive` (bool), `raw_response` (first 500 chars from the server), `error` (null on success).
+> **If `PANDA_MCP_BASE_URL` is unset:** the tool returns `is_alive: false` with an error message explaining the server is not connected — no crash.
+> **Check with `/inspect`:** should show `"is_alive": true` and the raw server response.
+
+---
+
 ## Queue / site configuration (`panda_queue_info`)
 
 ```
@@ -275,4 +299,31 @@ How many pilots and failed jobs are there for task 29871234?
 
 # Pure pilot question with jobs-like phrasing (should NOT trigger site-health)
 How many pilots failed at BNL in the last hour?
+
+# PanDA health — should NOT match site/job questions that mention panda
+What is the status of task 29871234 on the panda server?
+How many panda jobs failed at BNL?
 ```
+
+---
+
+## PanDA server health edge cases
+
+```
+# Plain liveness — should route to panda_server_health, not RAG
+Is PanDA alive?
+Is the PanDA server OK?
+
+# Synonym forms
+Is PanDA up?
+Is PanDA running?
+Is PanDA available?
+Is PanDA down?
+
+# Job/task questions that mention panda incidentally — must NOT route to panda_server_health
+How many panda jobs failed at BNL?
+What is the status of panda task 29871234?
+```
+
+> **Verify false-negative:** `/fastpath off` then ask "Is PanDA alive?" — the planner should still select `panda_server_health`.
+> **Verify false-positive guard:** "How many panda jobs failed at BNL?" must route to `panda_jobs_query`, not `panda_server_health`.
