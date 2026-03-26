@@ -420,6 +420,31 @@ _JOBS_DB_SIGNALS: frozenset[str] = frozenset({
     "finished on",
 })
 
+# Job-specific signals for site-health detection: a subset of _JOBS_DB_SIGNALS
+# that excludes generic counting phrases like "how many" and "count", and also
+# excludes status-at phrases like "ran at" / "failed at" that can appear in
+# pure pilot questions ("how many pilots failed at BNL?").  The signals here
+# must unambiguously refer to jobs, not pilots.
+_JOBS_DB_SPECIFIC_SIGNALS: frozenset[str] = frozenset({
+    "errors at",
+    "top errors",
+    "job status at",
+    "which jobs",
+    "jobs at",
+    "jobs failed at",
+    "failed jobs",
+    "failing jobs",
+    "job failures",
+    "job errors",
+    "job error",
+    "most failed",
+    "most errors",
+    "most jobs",
+    "each status",
+    "by status",
+    "status breakdown",
+})
+
 
 def _is_jobs_db_question(question: str) -> bool:
     """Return ``True`` when the question looks like a live jobs DB lookup.
@@ -502,12 +527,64 @@ def _is_pilot_question(question: str) -> bool:
     return any(sig in q for sig in _PILOT_SIGNALS)
 
 
-def _extract_site_from_question(question: str) -> str | None:
-    """Extract a computing site name from a pilot question, if present.
+def _is_site_health_question(question: str) -> bool:
+    """Return ``True`` when the question requires both pilot and job statistics.
 
-    Applies a conservative set of known ATLAS site names.  Returns the
-    first match found (case-insensitive).  Returns ``None`` when no known
-    site name appears — the tool will then query across all sites.
+    Detects questions that contain a pilot signal from :data:`_PILOT_SIGNALS`
+    alongside either:
+
+    - a phrase from :data:`_JOBS_DB_SPECIFIC_SIGNALS` (e.g. ``"job failures"``,
+      ``"failed jobs"``, ``"job error"``), or
+    - any bare occurrence of the word ``"job"`` or ``"jobs"`` from
+      :data:`_JOB_WORDS`.
+
+    The two-tier check handles both explicit job-stat phrasing
+    (``"job failure rate"``) and natural co-occurrence phrasing
+    (``"pilots and jobs"``, ``"job failure rates"``).
+
+    Status-at phrases like ``"ran at"`` / ``"failed at"`` are intentionally
+    absent from both signal sets to avoid false positives on pure pilot
+    questions such as ``"how many pilots failed at BNL?"``.
+
+    Questions with a ``"task"`` keyword are excluded: they likely refer to a
+    specific task rather than live site statistics.
+
+    Args:
+        question: User question text (before any normalisation).
+
+    Returns:
+        ``True`` if the question should call both harvester and jobs tools.
+    """
+    q = question.lower()
+    if "task" in q:
+        return False
+    has_pilot = any(sig in q for sig in _PILOT_SIGNALS)
+    if not has_pilot:
+        return False
+    # Use word-boundary matching for "job"/"jobs" to avoid false matches
+    # on substrings (e.g. "panda_job_status" or "jobtype").
+    has_jobs = (
+        any(sig in q for sig in _JOBS_DB_SPECIFIC_SIGNALS) or
+        bool(re.search(r"\bjobs?\b", q))
+    )
+    return has_jobs
+
+
+def _extract_site_from_question(question: str) -> str | None:
+    """Extract a computing site name from a question, if present.
+
+    Uses two strategies in order:
+
+    1. **Contextual pattern** — matches an uppercase token that follows a
+       site-indicator word (``at``, ``for``, ``site``, ``queue``,
+       ``from``, ``in``).  This handles the vast majority of real
+       questions ("pilots at MWT2", "jobs at AGLT2", "site BNL").
+
+    2. **Known-site fallback** — a short list of very common sites that
+       appear as plain keywords without a preposition (e.g. "BNL
+       summary").
+
+    Site names are returned in uppercase as they appear in BigPanDA.
 
     Args:
         question: User question text.
@@ -515,16 +592,42 @@ def _extract_site_from_question(question: str) -> str | None:
     Returns:
         Site name string (uppercase), or ``None`` if not found.
     """
-    # Common ATLAS computing site names.  Extend as needed.
+    # Strategy 1: token after a site-indicator preposition/keyword.
+    # Handles: "at MWT2", "at BNL", "for AGLT2", "for site X",
+    # "for queue X", "site X", "queue X", "from X".
+    # An optional bridge word (site/queue) is allowed between the preposition
+    # and the actual site token.
+    _STOP_WORDS = frozenset({
+        "the", "a", "an", "this", "that", "my", "your", "our", "their",
+        "site", "queue", "all", "any", "each", "now", "here", "there",
+    })
+    _ctx = re.search(
+        r"\b(?:at|for|from)\s+(?:site\s+|queue\s+)?([A-Za-z][A-Za-z0-9_\-\.]{1,19})"
+        r"|"
+        r"\b(?:site|queue)\s+([A-Za-z][A-Za-z0-9_\-\.]{1,19})\b",
+        question,
+    )
+    if _ctx:
+        token = _ctx.group(1) or _ctx.group(2)
+        if token and token.lower() not in _STOP_WORDS:
+            token_upper = token.upper()
+            # Accept if: has a digit, or has separator chars, or is all-uppercase ≥2 chars.
+            if (any(c.isdigit() for c in token) or
+                    re.search(r"[_\-\.]", token) or
+                    (token.isupper() and len(token) >= 2)):
+                return token_upper
+
+    # Strategy 2: short fallback list for sites used without a preposition.
     _KNOWN_SITES: tuple[str, ...] = (
         "BNL", "CERN", "AGLT2", "SLAC", "SWT2", "TRIUMF", "IN2P3",
-        "NIKHEF", "PIC", "SARA", "TOKYO", "BEIJING", "TAIWAN",
-        "GRIF", "IFIC", "INFN", "JINR", "KIAE", "SIGNET",
+        "NIKHEF", "PIC", "SARA", "MWT2", "NET2", "TOKYO", "BEIJING",
+        "TAIWAN", "GRIF", "IFIC", "INFN", "JINR", "KIAE", "SIGNET",
     )
     q_upper = question.upper()
     for site in _KNOWN_SITES:
-        if site in q_upper:
+        if re.search(r"\b" + re.escape(site) + r"\b", q_upper):
             return site
+
     return None
 
 
@@ -985,14 +1088,22 @@ async def _run_fast_path_intercepts(
     question: str,
     history: list[Message],
 ) -> "list[MCPContent] | None":
-    """Run pilot and jobs-DB fast-path intercepts, bypassing the topic guard.
+    """Run fast-path intercepts that bypass the topic guard.
 
     Performs early contextual ID resolution and, when no ID is present,
-    checks for unambiguous pilot or jobs-DB signal phrases.  If either
-    matches, builds a deterministic plan and executes it immediately.
+    checks for unambiguous signal phrases in priority order:
+
+    1. **Site health** — both pilot AND jobs signals present → calls
+       ``panda_harvester_workers`` + ``panda_jobs_query`` in one plan.
+    2. **Pilot only** → ``panda_harvester_workers``.
+    3. **Jobs DB only** → ``panda_jobs_query``.
+
+    The combined check must come first because a site-health question
+    would otherwise be captured by the pilot-only check and the jobs
+    data would never be fetched.
 
     Returns the synthesised answer when a fast-path fires, or ``None``
-    when neither intercept matches and normal routing should continue.
+    when no intercept matches and normal routing should continue.
 
     Args:
         question: The current user question.
@@ -1008,8 +1119,41 @@ async def _run_fast_path_intercepts(
     )
 
     if not task_id_early and not job_id_early:
-        # Pilot / Harvester fast-path — checked before jobs DB because
-        # "pilot" can overlap with jobs DB signal phrases.
+        # Combined site-health fast-path — must be checked before the
+        # individual pilot/jobs checks so both tools are called.
+        if _is_site_health_question(question):
+            site = _extract_site_from_question(question)
+            window = _extract_time_window_from_question(question)
+            pilot_args: dict[str, str] = {"question": question}
+            if site:
+                pilot_args["site"] = site
+            if window:
+                pilot_args["from_dt"], pilot_args["to_dt"] = window
+            jobs_args: dict[str, str] = {"question": question}
+            if site:
+                jobs_args["queue"] = site
+            plan = Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=0.95,
+                tool_calls=[
+                    ToolCall(
+                        tool="panda_harvester_workers",
+                        arguments=pilot_args,
+                    ),
+                    ToolCall(
+                        tool="panda_jobs_query",
+                        arguments=jobs_args,
+                    ),
+                ],
+                reuse_policy=ReusePolicy(),
+                explain=(
+                    "Deterministic: pilot + jobs DB signals, no task/job ID "
+                    "→ site health (harvester workers + jobs query)."
+                ),
+            )
+            return await execute_plan(plan, question, history)
+
+        # Pilot-only fast-path.
         if _is_pilot_question(question):
             fast_plan = _build_deterministic_plan(question, None, None)
             if fast_plan is not None:
@@ -1080,6 +1224,16 @@ class BambooAnswerTool:
                         "default": False,
                         "description": "If true, skip task-ID extraction and send directly to LLM.",
                     },
+                    "bypass_fast_path": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "If true, skip the deterministic fast-path intercepts "
+                            "(pilot, jobs DB, site-health) and fall through to the "
+                            "topic guard and LLM planner.  Useful for testing planner "
+                            "routing on questions that would normally be short-circuited."
+                        ),
+                    },
                     "include_jobs": {
                         "type": "boolean",
                         "default": True,
@@ -1115,6 +1269,7 @@ class BambooAnswerTool:
         messages_raw: list[Any] = arguments.get("messages") or []
         messages: list[Message] = coerce_messages(messages_raw) if messages_raw else []
         bypass_routing: bool = bool(arguments.get("bypass_routing", False))
+        bypass_fast_path: bool = bool(arguments.get("bypass_fast_path", False))
         include_jobs: bool = bool(arguments.get("include_jobs", True))
         include_raw: bool = bool(arguments.get("include_raw", False))
 
@@ -1134,6 +1289,7 @@ class BambooAnswerTool:
                 question=question,
                 history=history,
                 bypass_routing=bypass_routing,
+                bypass_fast_path=bypass_fast_path,
                 include_jobs=include_jobs,
                 include_raw=include_raw,
             )
@@ -1145,6 +1301,7 @@ class BambooAnswerTool:
         question: str,
         history: list[Message],
         bypass_routing: bool,
+        bypass_fast_path: bool,
         include_jobs: bool,
         include_raw: bool,
     ) -> list[MCPContent]:
@@ -1156,6 +1313,10 @@ class BambooAnswerTool:
                 the current question.
             bypass_routing: If True, skip routing and delegate directly to the
                 LLM passthrough tool.
+            bypass_fast_path: If True, skip the deterministic fast-path
+                intercepts so the question falls through to the topic guard
+                and LLM planner.  Useful for testing planner routing on
+                questions that would normally be short-circuited.
             include_jobs: Passed as a hint to the planner for task-status calls.
             include_raw: Passed as a hint to the planner for error formatting.
 
@@ -1172,10 +1333,12 @@ class BambooAnswerTool:
             return text_content(_ACK_RESPONSE)
 
         # Fast-path intercepts — pilot and jobs DB — bypass the topic guard
-        # for clearly on-topic questions.  See _run_fast_path_intercepts().
-        intercept = await _run_fast_path_intercepts(question, history)
-        if intercept is not None:
-            return intercept
+        # for clearly on-topic questions.  Skipped when bypass_fast_path is
+        # set so the question falls through to the topic guard and LLM planner.
+        if not bypass_fast_path:
+            intercept = await _run_fast_path_intercepts(question, history)
+            if intercept is not None:
+                return intercept
 
         # Topic guard + content-free followup reformulation.
         rag_query, blocked = await _run_topic_guard(question, history)
@@ -1187,14 +1350,17 @@ class BambooAnswerTool:
         job_id = _extract_job_id(question)
         task_id, job_id = _resolve_contextual_ids(question, task_id, job_id, history)
 
-        # Fast-path: deterministic routing for unambiguous cases.
-        fast_plan = _build_deterministic_plan(rag_query, task_id, job_id)
-        if fast_plan is not None:
-            original_question = question if rag_query != question else None
-            return await execute_plan(
-                fast_plan, rag_query, history,
-                original_question=original_question,
-            )
+        # Deterministic fast-path for ID-based and signal-based routing.
+        # Skipped when bypass_fast_path is set so the LLM planner handles all
+        # routing — useful for testing planner coverage.
+        if not bypass_fast_path:
+            fast_plan = _build_deterministic_plan(rag_query, task_id, job_id)
+            if fast_plan is not None:
+                original_question = question if rag_query != question else None
+                return await execute_plan(
+                    fast_plan, rag_query, history,
+                    original_question=original_question,
+                )
 
         # LLM planner fallback for ambiguous or multi-step questions.
         hints: dict[str, Any] = {}
@@ -1229,6 +1395,7 @@ __all__ = [
     "_build_clarification_response",
     "_is_jobs_db_question",
     "_is_pilot_question",
+    "_is_site_health_question",
     "_extract_site_from_question",
     "_extract_time_window_from_question",
     "_PILOT_SIGNALS",

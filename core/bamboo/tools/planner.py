@@ -29,6 +29,7 @@ from bamboo.llm.runtime import get_llm_manager, get_llm_selector
 from bamboo.llm.types import GenerateParams, Message
 from bamboo.tools.base import MCPContent, text_content
 from bamboo.tools.loader import list_tool_entry_points, find_tool_by_name
+from bamboo.tracing import EVENT_LLM_CALL, span
 
 
 class PlanRoute(str, Enum):
@@ -195,8 +196,19 @@ def build_planner_system_prompt(schema: dict[str, Any]) -> str:
         "use panda_log_analysis. route=FAST_PATH.\n"
         "- If the question asks about a job (hints.job_id present, no failure keywords): "
         "use panda_job_status. route=FAST_PATH.\n"
-        "- If the question asks about a site or queue: "
-        "use panda_queue_info or panda_pilot_status. route=FAST_PATH.\n"
+        "- If the question asks about BOTH pilot counts/status AND job counts/failures "
+        "at a site (e.g. 'pilot and job failure rates', 'pilots and jobs at BNL', "
+        "'site health'): use panda_harvester_workers AND panda_jobs_query together. "
+        "Pass site= to panda_harvester_workers and queue= to panda_jobs_query. "
+        "route=FAST_PATH.\n"
+        "- If the question asks about live pilot counts, pilot status, or Harvester "
+        "worker activity at a site (e.g. 'how many pilots', 'pilot failure rate', "
+        "'pilots running at X'): use panda_harvester_workers. route=FAST_PATH.\n"
+        "- If the question asks about live job counts, job failures, job status, "
+        "or error rates at a site (e.g. 'how many jobs failed', 'job failure rate', "
+        "'top errors at X'): use panda_jobs_query. route=FAST_PATH.\n"
+        "- If the question asks about a site's queue configuration: "
+        "use panda_queue_info. route=FAST_PATH.\n"
         "- For ALL other questions (general knowledge, concepts, how-to, 'what is'): "
         "use panda_doc_search AND panda_doc_bm25 together. route=RETRIEVE. "
         "Never answer general questions from the LLM alone — always retrieve first.\n\n"
@@ -489,7 +501,7 @@ class BambooPlannerTool:
 
 
 async def _call_default_llm(messages: list[Message], temperature: float, max_tokens: int) -> str:
-    """Call the configured default LLM profile.
+    """Call the configured default LLM profile and emit a trace span.
 
     Args:
         messages: Chat messages.
@@ -513,6 +525,19 @@ async def _call_default_llm(messages: list[Message], temperature: float, max_tok
         messages=messages,
         params=GenerateParams(temperature=temperature, max_tokens=max_tokens),
     )
+
+    # Emit a llm_call span so token counts appear in /costs and /tracing.
+    usage = resp.usage
+    async with span(
+        EVENT_LLM_CALL,
+        tool="bamboo_plan",
+        provider=getattr(model_spec, "provider", ""),
+        model=getattr(model_spec, "model", ""),
+        input_tokens=usage.input_tokens if usage else None,
+        output_tokens=usage.output_tokens if usage else None,
+    ):
+        pass
+
     return resp.text
 
 

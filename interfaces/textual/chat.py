@@ -224,6 +224,107 @@ def _tool_names_from_list_tools(list_tools_result: Any) -> List[str]:
     return []
 
 
+# ---------------------------------------------------------------------------
+# Token cost estimation
+# ---------------------------------------------------------------------------
+
+# Per-model pricing in USD per 1 million tokens: (input_rate, output_rate).
+# Add new models here as needed; unknown models fall back to _DEFAULT_COST_PER_MTOK.
+# Prices are approximate — verify against current provider documentation.
+_MODEL_COST_PER_MTOK: Dict[str, tuple] = {
+    # Mistral
+    "mistral-large-latest": (2.00, 6.00),
+    "mistral-large-2411": (2.00, 6.00),
+    "mistral-small-latest": (0.20, 0.60),
+    "mistral-small-2501": (0.20, 0.60),
+    "open-mistral-nemo": (0.15, 0.15),
+    # Anthropic
+    "claude-opus-4-5": (15.00, 75.00),
+    "claude-sonnet-4-5": (3.00, 15.00),
+    "claude-haiku-4-5": (0.80, 4.00),
+    "claude-3-5-sonnet-20241022": (3.00, 15.00),
+    "claude-3-5-haiku-20241022": (0.80, 4.00),
+    # OpenAI
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4-turbo": (10.00, 30.00),
+    "gpt-3.5-turbo": (0.50, 1.50),
+    # Google
+    "gemini-1.5-pro": (1.25, 5.00),
+    "gemini-1.5-flash": (0.075, 0.30),
+    "gemini-2.0-flash": (0.10, 0.40),
+}
+
+# Fallback rate used when the model is not in _MODEL_COST_PER_MTOK.
+_DEFAULT_COST_PER_MTOK: tuple = (1.00, 3.00)
+
+
+def _estimate_cost(spans: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Estimate the LLM cost of a request from its trace spans.
+
+    Sums ``input_tokens`` and ``output_tokens`` across all ``llm_call``
+    spans and prices them using :data:`_MODEL_COST_PER_MTOK`.  When a
+    model is not found in the table the default rate is used and the model
+    name is recorded in ``unknown_models`` so the caller can warn the user.
+
+    Args:
+        spans: Parsed trace span dicts from ``_last_spans``.
+
+    Returns:
+        Dict with keys ``calls`` (per-call breakdown list),
+        ``total_input``, ``total_output``, ``total_tokens``,
+        ``total_cost_usd``, and ``unknown_models``.
+    """
+    calls: List[Dict[str, Any]] = []
+    unknown_models: List[str] = []
+    total_input = 0
+    total_output = 0
+    total_cost = 0.0
+
+    for span in spans:
+        if span.get("event") != "llm_call":
+            continue
+        model = str(span.get("model", "unknown"))
+        provider = str(span.get("provider", ""))
+        inp = int(span.get("input_tokens") or 0)
+        out = int(span.get("output_tokens") or 0)
+        duration_ms = float(span.get("duration_ms", 0.0))
+
+        rate = (
+            _MODEL_COST_PER_MTOK.get(model) or
+            _MODEL_COST_PER_MTOK.get(model.lower())
+        )
+        if rate is None:
+            unknown_models.append(model)
+            rate = _DEFAULT_COST_PER_MTOK
+
+        call_cost = (inp / 1_000_000) * rate[0] + (out / 1_000_000) * rate[1]
+
+        calls.append({
+            "provider": provider,
+            "model": model,
+            "input_tokens": inp,
+            "output_tokens": out,
+            "duration_ms": duration_ms,
+            "cost_usd": call_cost,
+            "rate_in": rate[0],
+            "rate_out": rate[1],
+        })
+
+        total_input += inp
+        total_output += out
+        total_cost += call_cost
+
+    return {
+        "calls": calls,
+        "total_input": total_input,
+        "total_output": total_output,
+        "total_tokens": total_input + total_output,
+        "total_cost_usd": total_cost,
+        "unknown_models": list(set(unknown_models)),
+    }
+
+
 class BambooTui(App):
     """Textual-based terminal UI for Bamboo."""
 
@@ -316,6 +417,7 @@ class BambooTui(App):
         self.help_text: str = "Enter to send • /help"
 
         self.debug_mode: bool = False
+        self.fast_path_mode: bool = True  # False → bypass deterministic intercepts, use LLM planner
         self._history: List[Dict[str, str]] = []  # In-memory chat history for multi-turn context
         self._mcp_ready: bool = False
         self._last_raw_result: Any = None  # Most recent raw MCP tool result for /json
@@ -720,6 +822,7 @@ class BambooTui(App):
             "question": question,
             "messages": list(self._history),
             "include_raw": self.debug_mode,
+            "bypass_fast_path": not self.fast_path_mode,
         }
 
         # Store task/job IDs if present so /json and /inspect can access them.
@@ -837,6 +940,12 @@ class BambooTui(App):
         if cmd == "/debug":
             self._cmd_debug(args)
             return
+        if cmd == "/fastpath":
+            self._cmd_fastpath(args)
+            return
+        if cmd == "/costs":
+            self._cmd_costs()
+            return
         if cmd == "/clear":
             await self.action_clear()
             return
@@ -856,6 +965,8 @@ class BambooTui(App):
             "  /history              Show turns currently held in context memory\n"
             "  /plugin <id>          Switch plugin (affects banner tool name)\n"
             "  /debug on|off         Toggle debug (shows tool calls + raw results)\n"
+            "  /fastpath on|off      Toggle deterministic fast-path routing (off → use LLM planner)\n"
+            "  /costs                Show estimated LLM token cost for the last request\n"
             "  /clear                Clear transcript, context memory, and HTTP cache\n"
             "  /exit, /quit          Exit the app\n"
             "\n"
@@ -906,6 +1017,100 @@ class BambooTui(App):
         else:
             self.debug_mode = not self.debug_mode
         self._write_system(f"Debug {'ON' if self.debug_mode else 'OFF'}.")
+
+    def _cmd_fastpath(self, args: List[str]) -> None:
+        """Toggle or explicitly set fast-path routing mode.
+
+        When fast-path is ON (default) the deterministic routing intercepts
+        handle pilot, jobs DB, and site-health questions without an LLM call.
+        When OFF, those intercepts are skipped and the question falls through
+        to the topic guard and LLM planner — useful for testing planner routing
+        on questions that would normally be short-circuited.
+
+        Args:
+            args (List[str]): Remaining command tokens; first element may be
+                ``"on"`` or ``"off"``.
+        """
+        if args and args[0].lower() in ("on", "off"):
+            self.fast_path_mode = args[0].lower() == "on"
+        else:
+            self.fast_path_mode = not self.fast_path_mode
+        status = "ON (deterministic routing)" if self.fast_path_mode else "OFF (LLM planner)"
+        self._write_system(f"Fast-path routing {status}.")
+
+    def _cmd_costs(self) -> None:
+        """Show estimated LLM token cost for the last request.
+
+        Reads ``input_tokens`` and ``output_tokens`` from every ``llm_call``
+        span in ``_last_spans``, prices them using :data:`_MODEL_COST_PER_MTOK`,
+        and presents a per-call breakdown table plus a total.  Models not in
+        the pricing table fall back to the default rate and are flagged.
+        """
+        if not self._last_spans:
+            self._write_system(
+                "No request data yet — ask a question first, then type /costs."
+            )
+            return
+
+        est = _estimate_cost(self._last_spans)
+        calls = est["calls"]
+
+        if not calls:
+            self._write_system(
+                "No LLM calls found in last request spans.\n"
+                "This can happen if tracing is disabled (BAMBOO_TRACE must be set) "
+                "or if the last request was answered from cache."
+            )
+            return
+
+        table = Table(
+            show_header=True,
+            header_style="bold",
+            box=None,
+            pad_edge=False,
+            collapse_padding=True,
+        )
+        table.add_column("Model", style="cyan", no_wrap=True)
+        table.add_column("Input tok", justify="right", style="yellow")
+        table.add_column("Output tok", justify="right", style="yellow")
+        table.add_column("Rate ($/Mtok in/out)", style="dim")
+        table.add_column("Cost (USD)", justify="right", style="green")
+
+        for call in calls:
+            rate_str = f"{call['rate_in']:.3f} / {call['rate_out']:.3f}"
+            cost_str = f"${call['cost_usd']:.6f}"
+            label = f"{call['provider']}/{call['model']}" if call["provider"] else call["model"]
+            table.add_row(
+                label,
+                f"{call['input_tokens']:,}",
+                f"{call['output_tokens']:,}",
+                rate_str,
+                cost_str,
+            )
+
+        table.add_section()
+        total_cost = est["total_cost_usd"]
+        table.add_row(
+            "[bold]TOTAL[/bold]",
+            f"[bold]{est['total_input']:,}[/bold]",
+            f"[bold]{est['total_output']:,}[/bold]",
+            "",
+            f"[bold green]${total_cost:.6f}[/bold green]",
+        )
+
+        note = ""
+        if est["unknown_models"]:
+            unknown = ", ".join(est["unknown_models"])
+            note = (
+                f"\n⚠  Unknown model(s): {unknown}\n"
+                f"   Rates defaulted to ${_DEFAULT_COST_PER_MTOK[0]:.2f}/"
+                f"${_DEFAULT_COST_PER_MTOK[1]:.2f} per Mtok. "
+                "Add the model to _MODEL_COST_PER_MTOK in chat.py for accurate pricing."
+            )
+
+        self._write_panel(table, title=f"{_now()}  costs (estimated)", border_style="green")
+        if note:
+            self._write_system(note)
 
     def _handle_history_command(self) -> None:
         """Render the current in-context conversation turns as a Rich table.

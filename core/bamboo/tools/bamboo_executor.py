@@ -177,6 +177,27 @@ _SYSTEM_HARVESTER_WORKERS: str = (
     "- Be concise. Lead with the number for count questions.\n"
 )
 
+_SYSTEM_SITE_HEALTH: str = (
+    "You are AskPanDA, an expert assistant for the PanDA workload management "
+    "system and ATLAS experiment workflows at CERN.\n"
+    "You have retrieved two independent evidence sources for a site health question:\n\n"
+    "1. [panda_harvester_workers] — live Harvester pilot/worker statistics.\n"
+    "   Key fields: nworkers_total, nworkers_by_status (running/idle/submitted/failed), "
+    "pivot ({status, jobtype, resourcetype, nworkers} rows), from_dt/to_dt, site_filter.\n\n"
+    "2. [panda_jobs_query] — live job counts from the ingestion database.\n"
+    "   Key fields: sql (the query executed), rows (result set), row_count, "
+    "error (null means success — do NOT treat null as an error).\n\n"
+    "Rules:\n"
+    "- Present both results clearly, labelled as pilots and jobs respectively.\n"
+    "- For pilots, lead with nworkers_by_status['running'] then total.\n"
+    "- For jobs, answer directly from the rows/row_count in the evidence.\n"
+    "- If either error field is non-null, explain that source failed and present "
+    "the other source's data on its own.\n"
+    "- Do not invent numbers from either source.\n"
+    "- Keep the response concise — a short paragraph per source is enough unless "
+    "the user asked for detail.\n"
+)
+
 # ---------------------------------------------------------------------------
 # RAG helpers (moved from bamboo_answer.py)
 # ---------------------------------------------------------------------------
@@ -432,6 +453,9 @@ def _pick_synthesis_prompt(tool_names: list[str]) -> str:
         return _SYSTEM_JOB
     if "panda_task_status" in tool_names:
         return _SYSTEM_TASK
+    # Combined site-health: both harvester and jobs query in the same plan.
+    if "panda_harvester_workers" in tool_names and "panda_jobs_query" in tool_names:
+        return _SYSTEM_SITE_HEALTH
     if "panda_harvester_workers" in tool_names:
         return _SYSTEM_HARVESTER_WORKERS
     if "panda_jobs_query" in tool_names:
@@ -680,6 +704,7 @@ __all__ = [
     "_SYSTEM_GENERIC",
     "_SYSTEM_JOBS_QUERY",
     "_SYSTEM_HARVESTER_WORKERS",
+    "_SYSTEM_SITE_HEALTH",
     "bamboo_last_evidence_tool",
 ]
 

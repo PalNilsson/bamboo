@@ -964,3 +964,261 @@ class TestPilotRoutingWithTimeWindow:
         assert args.get("site") == "CERN"
         assert "from_dt" in args
         assert "to_dt" in args
+
+    def test_site_extraction_unknown_site_pattern(self) -> None:
+        """Pattern-based extractor picks up sites not in the fallback list."""
+        from bamboo.tools.bamboo_answer import _extract_site_from_question
+        assert _extract_site_from_question(
+            "What are the pilot and job failure rates at MWT2?"
+        ) == "MWT2"
+
+    def test_site_extraction_with_separator(self) -> None:
+        """Sites with hyphens and underscores are extracted correctly."""
+        from bamboo.tools.bamboo_answer import _extract_site_from_question
+        assert _extract_site_from_question("Status for site SLAC-SCS") == "SLAC-SCS"
+        assert _extract_site_from_question("Pilots for queue CERN_PROD") == "CERN_PROD"
+        assert _extract_site_from_question("Pilots at SWT2_CPB") == "SWT2_CPB"
+
+    def test_site_extraction_no_false_positives(self) -> None:
+        """Generic words after prepositions are not extracted as sites."""
+        from bamboo.tools.bamboo_answer import _extract_site_from_question
+        assert _extract_site_from_question(
+            "How many pilots are running at the site?"
+        ) is None
+        assert _extract_site_from_question("Status for site here") is None
+
+
+# ---------------------------------------------------------------------------
+# _is_site_health_question
+# ---------------------------------------------------------------------------
+
+
+class TestIsSiteHealthQuestion:
+    """Unit tests for :func:`bamboo_answer._is_site_health_question`."""
+
+    @staticmethod
+    def _fn(q: str) -> bool:
+        """Import and call the function under test."""
+        from bamboo.tools.bamboo_answer import _is_site_health_question
+        return _is_site_health_question(q)
+
+    # --- should be True ---
+
+    def test_pilots_and_failed_jobs(self) -> None:
+        """Explicit mention of both pilots and failed jobs triggers site-health."""
+        assert self._fn(
+            "How many pilots and how many failed jobs are there at BNL right now?"
+        ) is True
+
+    def test_job_failure_rates_with_pilot(self) -> None:
+        """'job failure rates' alongside pilot signal triggers site-health."""
+        assert self._fn(
+            "What are the pilot and job failure rates at BNL?"
+        ) is True
+
+    def test_bare_jobs_word_with_pilot(self) -> None:
+        """Bare 'jobs' word alongside pilot signal is sufficient for site-health."""
+        assert self._fn("How is BNL doing — pilots and jobs?") is True
+
+    def test_running_pilots_and_job_failures(self) -> None:
+        """'running pilots' + 'job failures' triggers site-health."""
+        assert self._fn("How many running pilots and job failures at CERN?") is True
+
+    def test_pilot_count_and_job_error_rate(self) -> None:
+        """'pilot count' + 'job error' triggers site-health."""
+        assert self._fn("What is the pilot count and job error rate at AGLT2?") is True
+
+    def test_summary_with_pilots_and_failed_jobs(self) -> None:
+        """Site summary phrasing with pilots and failed jobs triggers site-health."""
+        assert self._fn("Give me a BNL summary — pilots and failed jobs") is True
+
+    def test_pilots_and_which_jobs_failing(self) -> None:
+        """'pilots' + 'which jobs are failing' triggers site-health."""
+        assert self._fn("How many pilots and which jobs are failing at BNL?") is True
+
+    # --- should be False (pure pilot) ---
+
+    def test_pure_pilot_running_at(self) -> None:
+        """Pure pilot question with 'running at' must not trigger site-health."""
+        assert self._fn("How many pilots are running at BNL?") is False
+
+    def test_pure_pilot_failed_at(self) -> None:
+        """'pilots failed at' must not trigger site-health."""
+        assert self._fn("How many pilots failed at BNL in the last hour?") is False
+
+    def test_pure_pilot_ran_at(self) -> None:
+        """'pilots ran at' must not trigger site-health."""
+        assert self._fn("How many pilots ran at AGLT2 yesterday?") is False
+
+    def test_pure_pilot_idle(self) -> None:
+        """'pilots idle' must not trigger site-health."""
+        assert self._fn("How many pilots are idle at CERN?") is False
+
+    # --- should be False (pure jobs) ---
+
+    def test_pure_jobs_failed(self) -> None:
+        """Pure jobs question must not trigger site-health."""
+        assert self._fn("How many jobs failed at BNL?") is False
+
+    def test_pure_jobs_failed_at(self) -> None:
+        """'failed at' without pilot signal must not trigger site-health."""
+        assert self._fn("How many failed at AGLT2?") is False
+
+    # --- should be False (task keyword) ---
+
+    def test_task_keyword_excluded(self) -> None:
+        """Questions with 'task' are excluded from site-health routing."""
+        assert self._fn(
+            "How many pilots and failed jobs are there for task 12345?"
+        ) is False
+
+
+# ---------------------------------------------------------------------------
+# Site-health two-tool routing integration
+# ---------------------------------------------------------------------------
+
+
+class TestSiteHealthRouting:
+    """Verify that site-health questions produce a two-tool plan."""
+
+    @staticmethod
+    def _tools(question: str) -> list[str]:
+        """Return the tool names from the deterministic plan for *question*.
+
+        For site-health questions the plan is built inside
+        ``_run_fast_path_intercepts`` rather than ``_build_deterministic_plan``,
+        so we import and call the intercept function directly with a null
+        history.
+        """
+        import asyncio
+        from bamboo.tools.bamboo_answer import _run_fast_path_intercepts
+        from unittest.mock import patch
+
+        captured: list[list[str]] = []
+
+        async def _fake_execute(plan, q, history, **kw):  # type: ignore[misc]
+            """Capture tool names instead of executing the plan."""
+            captured.append([tc.tool for tc in plan.tool_calls])
+            return [{"type": "text", "text": "stub"}]
+
+        with patch(
+            "bamboo.tools.bamboo_answer.execute_plan",
+            side_effect=_fake_execute,
+        ):
+            asyncio.run(_run_fast_path_intercepts(question, []))
+
+        return captured[0] if captured else []
+
+    def test_site_health_calls_both_tools(self) -> None:
+        """Site-health question routes to both harvester and jobs query."""
+        tools = self._tools(
+            "How many pilots and how many failed jobs are there at BNL right now?"
+        )
+        assert "panda_harvester_workers" in tools
+        assert "panda_jobs_query" in tools
+
+    def test_site_health_harvester_before_jobs(self) -> None:
+        """Harvester workers is called before jobs query in the plan."""
+        tools = self._tools(
+            "How many running pilots and job failures at CERN?"
+        )
+        assert tools.index("panda_harvester_workers") < tools.index("panda_jobs_query")
+
+    def test_pure_pilot_calls_only_harvester(self) -> None:
+        """Pure pilot question routes to harvester only, not jobs query."""
+        tools = self._tools("How many pilots are running at BNL?")
+        assert "panda_harvester_workers" in tools
+        assert "panda_jobs_query" not in tools
+
+    def test_pure_jobs_calls_only_jobs_query(self) -> None:
+        """Pure jobs question routes to jobs query only, not harvester."""
+        tools = self._tools("How many jobs failed at BNL?")
+        assert "panda_jobs_query" in tools
+        assert "panda_harvester_workers" not in tools
+
+    def test_site_health_passes_queue_to_jobs_query(self) -> None:
+        """Site extracted from question is passed as 'queue' to panda_jobs_query."""
+        import asyncio
+        from bamboo.tools.bamboo_answer import _run_fast_path_intercepts
+        from unittest.mock import patch
+
+        captured_args: list[dict] = []
+
+        async def _fake_execute(plan, q, history, **kw):  # type: ignore[misc]
+            """Capture tool call arguments from the plan."""
+            for tc in plan.tool_calls:
+                captured_args.append({"tool": tc.tool, "args": dict(tc.arguments)})
+            return [{"type": "text", "text": "stub"}]
+
+        with patch("bamboo.tools.bamboo_answer.execute_plan", side_effect=_fake_execute):
+            asyncio.run(_run_fast_path_intercepts(
+                "What are the pilot and job failure rates at BNL?", []
+            ))
+
+        jobs_call = next(
+            (c for c in captured_args if c["tool"] == "panda_jobs_query"), None
+        )
+        assert jobs_call is not None, "panda_jobs_query was not called"
+        assert jobs_call["args"].get("queue") == "BNL", (
+            f"Expected queue=BNL, got: {jobs_call['args']}"
+        )
+
+        harvester_call = next(
+            (c for c in captured_args if c["tool"] == "panda_harvester_workers"), None
+        )
+        assert harvester_call is not None, "panda_harvester_workers was not called"
+        assert harvester_call["args"].get("site") == "BNL"
+
+
+# ---------------------------------------------------------------------------
+# _pick_synthesis_prompt: site-health case
+# ---------------------------------------------------------------------------
+
+
+class TestPickSynthesisPromptSiteHealth:
+    """Verify _pick_synthesis_prompt selects the site-health prompt correctly."""
+
+    def test_both_tools_selects_site_health(self) -> None:
+        """Both harvester and jobs query in tool_names → site-health prompt."""
+        from bamboo.tools.bamboo_executor import (
+            _pick_synthesis_prompt,
+            _SYSTEM_SITE_HEALTH,
+        )
+        result = _pick_synthesis_prompt(
+            ["panda_harvester_workers", "panda_jobs_query"]
+        )
+        assert result is _SYSTEM_SITE_HEALTH
+
+    def test_harvester_only_selects_harvester_prompt(self) -> None:
+        """Harvester alone does not select site-health prompt."""
+        from bamboo.tools.bamboo_executor import (
+            _pick_synthesis_prompt,
+            _SYSTEM_HARVESTER_WORKERS,
+            _SYSTEM_SITE_HEALTH,
+        )
+        result = _pick_synthesis_prompt(["panda_harvester_workers"])
+        assert result is _SYSTEM_HARVESTER_WORKERS
+        assert result is not _SYSTEM_SITE_HEALTH
+
+    def test_jobs_only_selects_jobs_prompt(self) -> None:
+        """Jobs query alone does not select site-health prompt."""
+        from bamboo.tools.bamboo_executor import (
+            _pick_synthesis_prompt,
+            _SYSTEM_JOBS_QUERY,
+            _SYSTEM_SITE_HEALTH,
+        )
+        result = _pick_synthesis_prompt(["panda_jobs_query"])
+        assert result is _SYSTEM_JOBS_QUERY
+        assert result is not _SYSTEM_SITE_HEALTH
+
+    def test_site_health_beats_individual_tools(self) -> None:
+        """Site-health prompt takes priority when both tools present."""
+        from bamboo.tools.bamboo_executor import (
+            _pick_synthesis_prompt,
+            _SYSTEM_SITE_HEALTH,
+        )
+        # Reverse order — should still pick site-health
+        result = _pick_synthesis_prompt(
+            ["panda_jobs_query", "panda_harvester_workers"]
+        )
+        assert result is _SYSTEM_SITE_HEALTH

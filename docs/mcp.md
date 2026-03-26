@@ -49,38 +49,32 @@ mechanisms, tried in order:
 
 **Deterministic routing** — `_build_deterministic_plan()` inspects the
 question for a task ID, a job ID, or failure-analysis keywords using regex
-patterns.  This produces a `Plan` object covering six cases:
+patterns.  This produces a `Plan` object.  For combined site-health questions,
+the two-tool plan is built directly in `_run_fast_path_intercepts()` rather
+than `_build_deterministic_plan()`.  The full priority order is:
 
-| Question contains | Tool called | Route |
+| Question contains | Tool(s) called | Route |
 |---|---|---|
 | job ID + failure keywords (analyse, why, fail, log…) | `panda_log_analysis` | `FAST_PATH` |
 | job ID (no task ID) | `panda_job_status` | `FAST_PATH` |
 | task ID | `panda_task_status` | `FAST_PATH` |
-| pilot/Harvester signals, no IDs | `panda_harvester_workers` | `FAST_PATH` |
-| jobs DB signals, no IDs | `panda_jobs_query` | `FAST_PATH` |
+| pilot signals + job-specific signals, no IDs | `panda_harvester_workers` + `panda_jobs_query` | `FAST_PATH` |
+| pilot signals only, no IDs | `panda_harvester_workers` | `FAST_PATH` |
+| jobs DB signals only, no IDs | `panda_jobs_query` | `FAST_PATH` |
 | neither | `panda_doc_search` + `panda_doc_bm25` | `RETRIEVE` |
 
 **No LLM is involved here.** This covers the overwhelming majority of
 questions with zero routing cost.
 
-Questions with pilot signal phrases (e.g. `"pilot"`, `"pilots"`, `"how many
-pilots"`, `"harvester worker"`, `"nworkers"`) bypass the topic guard entirely
-and route directly to `panda_harvester_workers`.  Site is extracted from the
-question text when a known ATLAS site name is present; temporal expressions
-(`"since yesterday"`, `"last 6 hours"`, `"today"`, explicit ISO ranges) are
-translated into `from_dt`/`to_dt` arguments before the plan is built.  The
-pilot rule is checked before the jobs DB rule because the word `"pilot"` can
-co-occur with jobs DB signal phrases.
+The site-health row (fourth) fires when a question contains signals from both
+`_PILOT_SIGNALS` and `_JOBS_DB_SPECIFIC_SIGNALS` — a job-specific subset that
+excludes generic phrases like `"how many"` and `"count"` to avoid false
+positives on pure pilot questions such as `"how many pilots are running?"`.
+Questions with `"task"` are excluded from site-health routing.
 
-Questions with jobs DB signal phrases (e.g. `"failed at BNL"`, `"top errors
-at SWT2_CPB"`, `"each status"`, `"last updated"`) bypass the topic guard
-entirely — they are self-evidently on-topic and the guard LLM call would add
-~3 s with no benefit.  Contextual ID resolution from history runs first so
-that pronouns like `"how many of those failed?"` (which match `"failed"` but
-refer to a task in history) still route to `panda_task_status`.
-
-See [`docs/jobs-database.md`](jobs-database.md) for the full schema, example
-queries, guard rules, and configuration.
+The pilot and site-health checks both bypass the topic guard entirely (saving
+~3 s).  Contextual ID resolution from history runs first so pronouns like
+`"how many of those failed?"` still route correctly to `panda_task_status`.
 
 **LLM planner fallback** — if the deterministic step cannot produce a plan
 (currently reserved for future multi-step questions), `bamboo_plan` is called.
@@ -256,8 +250,9 @@ combination of IDs and keywords builds a `Plan` object with no LLM call:
 | job_id + analysis keywords | `FAST_PATH` | `panda_log_analysis` |
 | job_id only (no task_id) | `FAST_PATH` | `panda_job_status` |
 | task_id | `FAST_PATH` | `panda_task_status` |
-| pilot/Harvester signals, no IDs | `FAST_PATH` | `panda_harvester_workers` |
-| jobs DB signals, no IDs | `FAST_PATH` | `panda_jobs_query` |
+| pilot + job-specific signals, no IDs | `FAST_PATH` | `panda_harvester_workers` + `panda_jobs_query` |
+| pilot signals only, no IDs | `FAST_PATH` | `panda_harvester_workers` |
+| jobs DB signals only, no IDs | `FAST_PATH` | `panda_jobs_query` |
 | no ID | `RETRIEVE` | `panda_doc_search` (top_k=5) + `panda_doc_bm25` (top_k=5) |
 
 This covers all common questions with **zero LLM cost**.
@@ -296,8 +291,9 @@ selected by `_pick_synthesis_prompt()` based on which tools ran:
 | `panda_log_analysis` | Log-analysis diagnostic prompt |
 | `panda_job_status` | Job-status summary prompt |
 | `panda_task_status` | Task-metadata summary prompt |
-| `panda_harvester_workers` | Pilot stats prompt (describes pivot table, flat breakdowns, and time window fields) |
-| `panda_jobs_query` | Jobs DB prompt (explicitly tells the LLM `"error": null` means success) |
+| `panda_harvester_workers` + `panda_jobs_query` | Site-health prompt (two labelled evidence sources: pilots and jobs) |
+| `panda_harvester_workers` alone | Pilot stats prompt (pivot table, flat breakdowns, time window) |
+| `panda_jobs_query` alone | Jobs DB prompt (explicitly tells the LLM `"error": null` means success) |
 | `panda_doc_search` or `panda_doc_bm25` | RAG documentation prompt |
 | other / mixed | Generic multi-tool prompt |
 

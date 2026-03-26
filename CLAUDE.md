@@ -98,6 +98,9 @@ TOOLS = {
   2. **Implicit short follow-up**: ≤ 10 words + status-specific domain term (`"failed"`, `"finished"`, `"running"`, etc.) — only applies the found ID if history actually contains one.
 - **`_build_deterministic_plan(rag_query, task_id, job_id)`** — fast-path routing without an LLM call: job ID + analysis keywords → `panda_log_analysis`; job ID → `panda_job_status`; task ID → `panda_task_status`; pilot/Harvester signals (no IDs) → `panda_harvester_workers`; jobs DB signals (no IDs) → `panda_jobs_query`; no IDs → RAG retrieval. The pilot rule runs before the jobs DB rule because the word "pilot" can co-occur with jobs DB signal phrases.
 - **`_is_pilot_question(question)`** — returns `True` when the question contains pilot/Harvester signal phrases (`"pilot"`, `"pilots"`, `"harvester worker"`, `"nworkers"`, `"pilot count"`, etc.) regardless of site or time expression. Used by the pilot fast-path intercept to bypass the topic guard for clearly on-topic pilot queries.
+- **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases and no `"task"` keyword.
+- **`_is_site_health_question(question)`** — returns `True` when the question contains signals from **both** `_PILOT_SIGNALS` and `_JOBS_DB_SPECIFIC_SIGNALS` (a job-specific subset that excludes generic phrases like "how many" to avoid false positives). These questions route to both `panda_harvester_workers` and `panda_jobs_query` in a single plan, checked in `_run_fast_path_intercepts` before the individual pilot/jobs checks.
+- **`_JOBS_DB_SPECIFIC_SIGNALS`** — the job-specific subset of `_JOBS_DB_SIGNALS` used by `_is_site_health_question`. Excludes generic counting phrases and status-at phrases that can appear in pure pilot questions.
 - **`_extract_site_from_question(question)`** — returns the first known ATLAS site name found in the question (BNL, CERN, AGLT2, SLAC, etc.), or `None` to query all sites.
 - **`_extract_time_window_from_question(question)`** — translates natural-language temporal expressions into explicit ISO-8601 `(from_dt, to_dt)` pairs (UTC). Handles: `"last/past N hours/minutes/days"`, `"yesterday"`, `"since yesterday"`, `"today"`, explicit `"between ISO and ISO"` ranges. Returns `None` for `"right now"` / `"currently"` / no temporal expression, in which case the tool defaults to the last hour.
 - **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases (`"failed at"`, `"top errors"`, `"each status"`, `"which queues"`, `"last updated"`, etc.) and no `"task"` keyword. Used by the fast-path intercept to skip the topic guard for clearly on-topic DB queries.
@@ -106,12 +109,14 @@ TOOLS = {
 Routing order in `_route()`:
 1. `bypass_routing` → direct LLM passthrough
 2. Social intercept (greeting / ack)
-3. **Pilot fast-path intercept** — contextual ID resolution from history runs first; if no ID found and `_is_pilot_question()` matches, the topic guard is skipped and the question routes directly to `panda_harvester_workers` with `site`, `from_dt`, and `to_dt` extracted from the question text.
-4. **Jobs DB fast-path intercept** — same pattern: if no ID found and `_is_jobs_db_question()` matches, routes directly to `panda_jobs_query`. Both fast-paths save ~3s per query by bypassing the topic guard LLM call.
-5. Topic guard + content-free followup reformulation
-6. ID extraction from question, then contextual ID resolution from history
-7. Deterministic fast-path plan
-8. LLM planner fallback (`bamboo_plan` with `execute=True`)
+3. **Fast-path intercepts** (`_run_fast_path_intercepts`) — contextual ID resolution first, then:
+   - **Site-health** — both pilot AND job-specific signals present → `panda_harvester_workers` + `panda_jobs_query` in one plan. Checked before individual pilot/jobs to prevent the pilot check from firing alone.
+   - **Pilot-only** — pilot signals, no job signals → `panda_harvester_workers`.
+   - **Jobs DB** — jobs DB signals → `panda_jobs_query`. All three bypass the topic guard (~3s saved).
+4. Topic guard + content-free followup reformulation
+5. ID extraction from question, then contextual ID resolution from history
+6. Deterministic fast-path plan
+7. LLM planner fallback (`bamboo_plan` with `execute=True`)
 
 ### Execution (`core/bamboo/tools/bamboo_executor.py`)
 
@@ -119,7 +124,7 @@ Routing order in `_route()`:
 
 - After each successful tool call, the full evidence dict (including `raw_payload`) is stored in `_last_evidence_store[tool_name]`. `raw_payload` is **stripped before synthesis** so the LLM only sees the compact evidence fields.
 - `BambooLastEvidenceTool` (`bamboo_last_evidence`) exposes the store via MCP. Accepts `mode="evidence"` (compact dict, `raw_payload` excluded) or `mode="raw"` (verbatim BigPanDA API response). Used by the TUI `/inspect` and `/json` commands.
-- `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_harvester_workers` → pilot stats prompt (describes pivot table, flat breakdowns, and time window); `panda_jobs_query` → jobs DB prompt (explicitly tells the LLM that `"error": null` means success); `panda_doc_*` → RAG documentation; other → generic.
+- `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_harvester_workers` + `panda_jobs_query` together → site-health prompt (two labelled evidence sources); `panda_harvester_workers` alone → pilot stats prompt; `panda_jobs_query` alone → jobs DB prompt; `panda_doc_*` → RAG documentation; other → generic.
 
 ### LLM Passthrough (`core/bamboo/tools/llm_passthrough.py`)
 
