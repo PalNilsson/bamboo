@@ -66,11 +66,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-dev.txt
+          python -m pip install -r requirements-rag.txt
           python -m pip install -e core/
           python -m pip install -e packages/askpanda_atlas/
           python -m pip install -e packages/askpanda_epic/
           python -m pip install -e packages/askpanda_verarubin/
 
-      - name: pytest
+      - name: pytest (core)
         run: |
-          pytest tests/
+          pytest tests/ -v
+
+      - name: pytest (askpanda_atlas)
+        run: |
+          pytest packages/askpanda_atlas/tests/ -v
+
+      - name: pytest (askpanda_epic)
+        run: |
+          pytest packages/askpanda_epic/tests/ -v

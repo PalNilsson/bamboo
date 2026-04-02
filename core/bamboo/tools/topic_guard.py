@@ -1,7 +1,7 @@
 """Two-stage topic guardrail for the Bamboo MCP server.
 
-Prevents the server from answering questions unrelated to PanDA, ATLAS, and
-HEP workflow systems, thus avoiding unnecessary LLM costs.
+Prevents the server from answering questions unrelated to PanDA, ATLAS, ePIC,
+and HEP workflow systems, thus avoiding unnecessary LLM costs.
 
 Classification runs in two stages:
 
@@ -12,7 +12,7 @@ Classification runs in two stages:
 2. **LLM classification** (fast profile, ~50 tokens) — used only for
    questions that the keyword stage cannot classify confidently.  The model
    is instructed to be permissive: if there is any plausible connection to
-   PanDA, ATLAS, or distributed HEP computing, the question is allowed.
+   PanDA, ATLAS, ePIC, or distributed HEP computing, the question is allowed.
 
 On any LLM failure the guard **allows** the question through — a guardrail
 failure must never silently block a legitimate user.  The failure is logged
@@ -39,6 +39,9 @@ _ALLOW_TERMS: list[str] = [
     # ATLAS / HEP
     "atlas", "cern", "lhc", "hep", "high energy physics",
     "wlcg", "grid", "egi",
+    # ePIC / EIC
+    "epic", "eic", "bnl", "brookhaven", "electron-ion collider",
+    "electron ion collider", "rhic",
     # Workflow / job concepts
     "task", "job", "pilot", "brokerage", "workload", "workflow",
     "queue", "site", "nucleus", "harvester", "idds", "idd",
@@ -104,7 +107,7 @@ _DENY_PHRASES: list[re.Pattern[str]] = [
 # ---------------------------------------------------------------------------
 
 _REJECTION_MESSAGE = (
-    "I can only answer questions about PanDA, ATLAS, and related HEP "
+    "I can only answer questions about PanDA, ATLAS, ePIC, and related HEP "
     "workflow systems. Please ask me something about tasks, jobs, pilots, "
     "sites, or grid computing."
 )
@@ -158,15 +161,15 @@ def _keyword_verdict(question_lower: str) -> str | None:
 
 _LLM_SYSTEM = (
     "You are a topic classifier for AskPanDA, an assistant specialised in "
-    "the PanDA workload management system, ATLAS experiment workflows, and "
+    "the PanDA workload management system, ATLAS and ePIC experiment workflows, and "
     "distributed high-energy physics (HEP) computing.\n\n"
     "Classify whether the user's question is relevant to this domain.\n\n"
     "Rules:\n"
     "- Reply with exactly one word: ALLOW or DENY.\n"
     "- Be PERMISSIVE: if the question could plausibly relate to PanDA, "
-    "ATLAS, grid computing, distributed systems, HEP software, or any "
-    "technology used in that context (Python, containers, databases, "
-    "networking, etc.), reply ALLOW.\n"
+    "ATLAS, ePIC, the Electron-Ion Collider (EIC), grid computing, distributed "
+    "systems, HEP software, or any technology used in that context (Python, "
+    "containers, databases, networking, etc.), reply ALLOW.\n"
     "- Reply DENY only when the question is clearly unrelated — e.g. "
     "cooking, sports, entertainment, personal advice, or unrelated finance.\n"
     "- No explanation. One word only."

@@ -1,14 +1,18 @@
 [project]
 name = "askpanda_epic"
 version = "0.0.1"
-description = "EPIC / EIC AskPanDA plugin (placeholder)"
+description = "ePIC / EIC AskPanDA plugin"
 requires-python = ">=3.10"
 dependencies = [
   "requests>=2.0",
 ]
 
 [project.entry-points."bamboo.tools"]
-"askpanda_epic.placeholder" = "askpanda_epic.placeholder:tool"
+"epic.task_status" = "askpanda_epic.task_status:panda_task_status_tool"
+"epic.log_analysis" = "askpanda_epic.log_analysis:panda_log_analysis_tool"
+"epic.ui_manifest" = "askpanda_epic.ui_manifest:epic_ui_manifest_tool"
+"epic.doc_search" = "askpanda_epic.doc_rag:epic_doc_search_tool"
+"epic.doc_bm25" = "askpanda_epic.doc_bm25:epic_doc_bm25_tool"
 
 [build-system]
 requires = ["setuptools>=69"]
@@ -16,3 +20,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["askpanda_epic"]
+
+[tool.setuptools.package-data]
+askpanda_epic = ["banner.txt"]

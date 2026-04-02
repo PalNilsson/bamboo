@@ -4,17 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Bamboo** is a lightweight MCP-based runtime with a plugin architecture for AI-assisted scientific tools, primarily targeting ATLAS/PanDA workflows. LLMs are used for summarisation and explanation, not as sources of truth. Structured evidence is always fetched from BigPanDA, cached, and passed to the LLM; the raw API payload is kept available for inspection.
+**Bamboo** is a lightweight MCP-based runtime with a plugin architecture for AI-assisted scientific tools, targeting ATLAS/PanDA and ePIC/EIC workflows. LLMs are used for summarisation and explanation, not as sources of truth. Structured evidence is always fetched from BigPanDA, cached, and passed to the LLM; the raw API payload is kept available for inspection.
 
 ## Development Setup
 
 ```bash
-# Install core and the ATLAS plugin in editable mode
+# Install core and plugins in editable mode
 pip install -e ./core
 pip install -e ./packages/askpanda_atlas
+pip install -e ./packages/askpanda_epic
 
 # Install dev dependencies
 pip install -r requirements-dev.txt
+
+# Install RAG dependencies (ChromaDB + BM25)
+pip install -r requirements-rag.txt
 
 # Install Textual TUI dependencies
 pip install -r requirements-textual.txt
@@ -36,11 +40,13 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 # List available tools
 python -m bamboo tools list
 
-# Run all tests (405 passing; 10 pre-existing failures in test_bamboo_executor.py and test_narrow_waist.py)
-pytest tests/
+# Run all tests
+pytest tests/                              # core and architectural tests
+pytest packages/askpanda_atlas/tests/      # ATLAS plugin tests
+pytest packages/askpanda_epic/tests/       # ePIC plugin tests
 
 # Run a single test file
-pytest tests/test_task_status_impl.py
+pytest packages/askpanda_atlas/tests/test_task_status_impl.py
 
 # Linting
 flake8 .
@@ -149,9 +155,25 @@ Tools are registered via `pyproject.toml` entry points under `bamboo.tools`:
 "atlas.task_status" = "askpanda_atlas.task_status:panda_task_status_tool"
 "atlas.ui_manifest" = "askpanda_atlas.ui_manifest:atlas_ui_manifest_tool"
 "atlas.jobs_query"  = "askpanda_atlas.jobs_query:panda_jobs_query_tool"
+
+"epic.task_status"  = "askpanda_epic.task_status:panda_task_status_tool"
+"epic.log_analysis" = "askpanda_epic.log_analysis:panda_log_analysis_tool"
+"epic.doc_search"   = "askpanda_epic.doc_rag:epic_doc_search_tool"
+"epic.doc_bm25"     = "askpanda_epic.doc_bm25:epic_doc_bm25_tool"
+"epic.ui_manifest"  = "askpanda_epic.ui_manifest:epic_ui_manifest_tool"
 ```
 
 Each plugin is a separate installable package under `packages/`. Core discovers plugins at startup via `importlib.metadata.entry_points`. The `TOOLS` dict keys (e.g. `"panda_task_status"`) are internal identifiers; MCP-exposed names come from `get_definition()["name"]`.
+
+Plugin tests live alongside the plugin code, not in `bamboo/tests/`:
+
+```
+packages/askpanda_atlas/tests/    ← ATLAS plugin tests
+packages/askpanda_epic/tests/     ← ePIC plugin tests
+bamboo/tests/                     ← core and architectural tests only
+```
+
+Each plugin `tests/` directory has its own `conftest.py` (sets `sys.path` for local source runs) and the plugin `pyproject.toml` declares `asyncio_mode = "strict"` and `testpaths = ["tests"]`.
 
 ### ATLAS Plugin (`packages/askpanda_atlas/`)
 
@@ -232,6 +254,27 @@ Entry point registration in `pyproject.toml`:
 - `_fetch_metadata` uses `cached_fetch_jsonish` (60 s TTL).
 - `_fetch_log_text` uses `cached_fetch_log` (infinite TTL).
 
+### ePIC Plugin (`packages/askpanda_epic/`)
+
+The ePIC plugin provides the same tool surface as the ATLAS plugin for the tools available at this stage. It shares three modules verbatim with ATLAS — `_fallback_http.py`, `_cache.py`, and `panda_task_schema.py` — since both experiments use the same BigPanDA API and JSON response shape.
+
+**Modules unique to the ePIC plugin:**
+
+- `task_status.py` / `task_status_impl.py` — shim + implementation; identical structure to ATLAS equivalents.
+- `log_analysis.py` / `log_analysis_impl.py` — shim + implementation; identical structure.
+- `doc_rag.py` — `EpicDocSearchTool(PandaDocSearchTool)` subclass. Overrides `get_definition()` (description mentions ePIC/EIC) and `_ensure_collection()` (defaults `BAMBOO_CHROMA_COLLECTION` to `epic_docs` instead of `bamboo_docs`). All query logic inherited from core.
+- `doc_bm25.py` — `EpicDocBM25Tool(PandaDocBM25Tool)` subclass. Same override pattern.
+- `ui_manifest.py` — `EpicUiManifestTool`. Returns `plugin_id="epic"`, `accent="green"`, and the ePIC ASCII banner.
+- `banner.txt` — ASCII art banner (`AskPanDA -- ePIC`, slant font, 79 columns). Loaded via `importlib.resources`; inline fallback present in `_load_banner_lines()`.
+
+**Key design decisions:**
+
+- `PANDA_BASE_URL` is the single env var for both ATLAS and ePIC — operators point it at the correct instance per deployment. No separate `EPIC_PANDA_BASE_URL`.
+- `BAMBOO_CHROMA_COLLECTION` defaults to `epic_docs` in ePIC doc tools (vs `bamboo_docs` in core). Both experiments can coexist in the same ChromaDB directory under different collection names.
+- `bamboo.tools.base` imports are deferred inside `call()` throughout, matching the ATLAS convention.
+
+**Tests:** `packages/askpanda_epic/tests/test_narrow_waist.py` verifies the MCP narrow-waist return type and schema contract for all five ePIC tools. HTTP calls are intercepted at `askpanda_epic._fallback_http.fetch_jsonish`; ChromaDB calls are intercepted by patching `_ensure_collection` and `_ensure_index` directly on the subclass.
+
 ### Textual TUI (`interfaces/textual/chat.py`)
 
 #### Slash Commands
@@ -284,15 +327,42 @@ The pricing table covers Mistral, Anthropic, OpenAI, and Google models. To add a
 
 Bamboo connects to the external PanDA MCP server at startup and holds the session open for the process lifetime. The session is registered with the process-wide `MCPCaller` under the name `"panda"`.
 
+**Known working endpoint:** `https://aipanda120.cern.ch:8443/mcp/` (streamable-HTTP transport, no auth token required as of March 2026).
+
 **Startup:**
 - `core/bamboo/server.py` (stdio): `asyncio.create_task(run_panda_mcp_session(shutdown_event))` before entering `stdio_server()`.
 - `core/bamboo/entrypoints/http.py` (ASGI): `_startup_panda_mcp()` is called from the `lifespan.startup` handler; teardown is wired into `_shutdown()`.
 
 If `PANDA_MCP_BASE_URL` is not set, the session helper logs a warning and exits immediately — tools that need it return a graceful `"server not connected"` error rather than crashing.
 
-Transport selection: `streamable_http_client` by default; `sse_client` when `PANDA_MCP_USE_SSE=1`.
+**Transport:** The `aipanda120.cern.ch` server runs the MCP streamable-HTTP transport (despite returning a `406 Not Acceptable` to bare GET requests — that is the correct MCP protocol response). Do **not** set `PANDA_MCP_USE_SSE=1` for this endpoint.
 
-Authentication is passed as HTTP headers (`Authorization: Bearer <token>` and `Origin: <vo>`), matching the PanDA Server authentication model described in the PandaMCP documentation.
+**TLS outside CERN:** The server uses a certificate signed by the CERN Grid CA. Python's `httpx` uses the `certifi` bundle by default, which does not include the CERN Grid CA. Two options:
+
+1. **Append the CERN CA to certifi** (permanent, recommended for shared installs):
+   ```bash
+   # Download and convert CERN Root CA 2
+   curl -o /tmp/cern-root-ca2.der \
+     "https://cafiles.cern.ch/cafiles/certificates/CERN%20Root%20Certification%20Authority%202.crt"
+   openssl x509 -inform DER -in /tmp/cern-root-ca2.der -out /tmp/cern-root-ca2.pem
+   # Download CERN Grid CA intermediate (note the (1) in the filename)
+   # Extract directly from the server since the CERN website redirects unreliably:
+   openssl s_client -connect aipanda120.cern.ch:8443 -showcerts 2>/dev/null </dev/null \
+     | openssl x509 -out /tmp/cern-server.pem
+   # Append root CA to certifi bundle
+   cat /tmp/cern-root-ca2.pem >> $(python3 -c "import certifi; print(certifi.where())")
+   ```
+   Then set `PANDA_MCP_CA_BUNDLE` if the intermediate is also needed.
+
+2. **Disable verification** (development/testing only):
+   ```bash
+   export PANDA_MCP_TLS_VERIFY=0
+   ```
+   This prints a warning at startup and should never be used in production.
+
+On **lxplus** and other CERN machines, the CERN Grid CA is in the system store and `ssl.create_default_context()` finds it automatically — no extra configuration needed.
+
+Authentication is passed as HTTP headers (`Authorization: Bearer <token>` and `Origin: <vo>`), matching the PanDA Server authentication model described in the PandaMCP documentation. The `aipanda120.cern.ch` endpoint does not currently require a token.
 
 #### PanDA Server Health (`panda_server_health.py`)
 
@@ -356,15 +426,20 @@ Each tool module must export:
 
 ### HTTP Cache Mock Pattern
 
-All tests that mock HTTP calls must patch `"askpanda_atlas._cache.cached_fetch_jsonish"` (not `_fallback_http.fetch_jsonish`). Mock signatures must include `timeout`:
+All tests that mock HTTP calls in ATLAS plugin tests must patch `"askpanda_atlas._cache.cached_fetch_jsonish"` (not `_fallback_http.fetch_jsonish`). For ePIC plugin tests that need to intercept at the HTTP boundary (e.g. in `test_narrow_waist.py`), patch `"askpanda_epic._fallback_http.fetch_jsonish"` — this is the correct intercept point because `cached_fetch_jsonish` imports `fetch_jsonish` from `_fallback_http` at call time. Mock signatures must include `timeout`:
 
 ```python
 def _ok_response(raw): return (200, "application/json", json.dumps(raw), raw)
 def _err_response(status=404): return (status, "text/html", "", None)
 
-# In tests:
+# ATLAS plugin tests:
 with patch("askpanda_atlas._cache.cached_fetch_jsonish",
            lambda url, timeout=30: _ok_response(raw)):
+    ...
+
+# ePIC narrow-waist test:
+with patch("askpanda_epic._fallback_http.fetch_jsonish",
+           MagicMock(return_value=(200, "application/json", "{}", {"status": "done"}))):
     ...
 ```
 
@@ -386,7 +461,9 @@ with patch("askpanda_atlas._cache.cached_fetch_jsonish",
 | `BAMBOO_TRACE` | `1` to enable structured tracing (default: off) |
 | `BAMBOO_TRACE_FILE` | Write trace spans to this file instead of stderr |
 | `BAMBOO_HISTORY_TURNS` | Max conversation turns held in context (default: 10) |
-| `PANDA_MCP_BASE_URL` | Full URL of the PanDA MCP HTTP endpoint, e.g. `http://pandaserver01.sdcc.bnl.gov:25080/mcp/`. If unset, PanDA MCP tools return a graceful "server not connected" error. |
+| `PANDA_MCP_BASE_URL` | Full URL of the PanDA MCP HTTP endpoint, e.g. `https://aipanda120.cern.ch:8443/mcp/`. If unset, PanDA MCP tools return a graceful "server not connected" error. |
 | `PANDA_MCP_TOKEN` | Optional bearer token sent as `Authorization: Bearer <token>` to the PanDA MCP server |
 | `PANDA_MCP_ORIGIN` | Optional VO name sent as `Origin: <vo>` (e.g. `atlas`) to the PanDA MCP server |
-| `PANDA_MCP_USE_SSE` | `1`/`true`/`yes` to use the legacy SSE transport; default is streamable-HTTP |
+| `PANDA_MCP_USE_SSE` | `1`/`true`/`yes` to use the SSE transport; default is streamable-HTTP (correct for `aipanda120.cern.ch`) |
+| `PANDA_MCP_TLS_VERIFY` | Set to `0` or `false` to disable TLS certificate verification. **Development/testing only** — use when the CERN Grid CA is not in the local Python CA bundle (common outside CERN). On lxplus and CERN machines leave this unset. |
+| `PANDA_MCP_CA_BUNDLE` | Path to a PEM CA bundle to use instead of the system default, e.g. `/tmp/CERN-bundle.pem`. Use when the CERN Grid CA is available as a standalone file but not in the system store. |

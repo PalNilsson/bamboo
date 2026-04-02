@@ -145,6 +145,37 @@ Is PanDA down?
 > **If `PANDA_MCP_BASE_URL` is unset:** the tool returns `is_alive: false` with an error message explaining the server is not connected — no crash.
 > **Check with `/inspect`:** should show `"is_alive": true` and the raw server response.
 
+### Setup
+
+**Minimum config (known working endpoint as of March 2026):**
+
+```bash
+export PANDA_MCP_BASE_URL="https://aipanda120.cern.ch:8443/mcp/"
+# PANDA_MCP_USE_SSE should NOT be set — this server uses streamable-HTTP
+```
+
+**At CERN / lxplus:** The CERN Grid CA is in the system store. No TLS configuration needed — just set `PANDA_MCP_BASE_URL` and start Bamboo.
+
+**Outside CERN (e.g. Mac laptop):** Python's `httpx` uses the `certifi` bundle which does not include the CERN Grid CA. Two options:
+
+Option 1 — append the CERN Root CA to your certifi bundle (survives restarts):
+```bash
+# Download CERN Root CA 2 and convert from DER to PEM
+curl -o /tmp/cern-root-ca2.der \
+  "https://cafiles.cern.ch/cafiles/certificates/CERN%20Root%20Certification%20Authority%202.crt"
+openssl x509 -inform DER -in /tmp/cern-root-ca2.der -out /tmp/cern-root-ca2.pem
+
+# Append to certifi (permanent until certifi is upgraded)
+cat /tmp/cern-root-ca2.pem >> $(python3 -c "import certifi; print(certifi.where())")
+```
+> **Note:** If certifi is upgraded via `pip`, you will need to append the CA again.
+
+Option 2 — disable TLS verification (development/testing only, not for production):
+```bash
+export PANDA_MCP_TLS_VERIFY=0
+```
+This prints a warning at startup. Use only when you cannot install the CA cert.
+
 ---
 
 ## Queue / site configuration (`panda_queue_info`)

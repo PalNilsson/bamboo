@@ -1,14 +1,14 @@
 # Bamboo
 
 **Bamboo** is a lightweight MCP-based runtime with a plugin architecture for
-AI-assisted scientific tools, primarily targeting PanDA/ATLAS workflows.
+AI-assisted scientific tools, targeting PanDA/ATLAS and ePIC/EIC workflows.
 
 LLMs are used for *summarisation and explanation*, not as sources of truth.
 Structured evidence is always returned alongside natural-language answers.
 
-> **Status (March 2026):** core infrastructure is stable; plugins and
-> documentation are still being expanded. The current focus is orchestration
-> using tool families and planning for complex multi-step prompts.
+> **Status (April 2026):** core infrastructure is stable; the ePIC plugin is
+> newly added and expanding. The current focus is multi-experiment support and
+> orchestration using tool families and planning for complex multi-step prompts.
 
 ---
 
@@ -28,14 +28,20 @@ source ~/Development/venv-bamboo/bin/activate
 pip install -r requirements.txt
 pip install -e ./core
 
-# ATLAS / PanDA plugin — required for AskPanDA workflows
+# ATLAS / PanDA plugin
 pip install -e ./packages/askpanda_atlas
+
+# ePIC / EIC plugin
+pip install -e ./packages/askpanda_epic
 
 # Root package — required for the TUI and Streamlit UI
 pip install -e .
 
 # TUI interface
 pip install -r requirements-textual.txt
+
+# RAG tools (ChromaDB vector search + BM25)
+pip install -r requirements-rag.txt
 ```
 
 Install **one** LLM provider (Mistral is the default):
@@ -48,7 +54,7 @@ pip install -r requirements-gemini.txt     # Google Gemini
 ```
 
 See [`docs/developer.md`](docs/developer.md) for the full list of optional
-feature packages (RAG, tracing, Streamlit UI, etc.).
+feature packages (tracing, Streamlit UI, etc.).
 
 ### 3. Configure environment
 
@@ -151,6 +157,35 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | Package | Status | Description |
 |---|---|---|
 | `askpanda_atlas` | Active | ATLAS / PanDA workflows |
+| `askpanda_epic` | Active | ePIC / EIC experiment at BNL |
 | `askpanda_verarubin` | Planned | Vera Rubin Observatory |
-| `askpanda_epic` | Planned | EPIC / EIC experiment |
 | `cgsim` | Planned | SimGrid-based workflows (non-PanDA) |
+
+### ATLAS plugin tools
+
+| Entry point | Tool name | Description |
+|---|---|---|
+| `atlas.task_status` | `panda_task_status` | Task metadata and job-level detail |
+| `atlas.log_analysis` | `panda_log_analysis` | Pilot/payload log download and failure classification |
+| `atlas.doc_search` | `panda_doc_search` | Vector similarity search over ATLAS documentation |
+| `atlas.doc_bm25` | `panda_doc_bm25` | BM25 keyword search over ATLAS documentation |
+| `atlas.jobs_query` | `panda_jobs_query` | Natural language → SQL against the ingestion DuckDB |
+| `atlas.harvester_workers` | `panda_harvester_workers` | Live Harvester pilot/worker counts |
+| `atlas.panda_server_health` | `panda_server_health` | PanDA server liveness via PanDA MCP |
+| `atlas.ui_manifest` | `atlas.ui_manifest` | TUI branding (banner, accent colour, display name) |
+
+Set `BAMBOO_CHROMA_COLLECTION=atlas_docs` when running the ATLAS deployment to
+point the doc tools at the ATLAS vector store.
+
+### ePIC plugin tools
+
+| Entry point | Tool name | Description |
+|---|---|---|
+| `epic.task_status` | `panda_task_status` | Task metadata and job-level detail |
+| `epic.log_analysis` | `panda_log_analysis` | Pilot/payload log download and failure classification |
+| `epic.doc_search` | `panda_doc_search` | Vector similarity search over ePIC documentation |
+| `epic.doc_bm25` | `panda_doc_bm25` | BM25 keyword search over ePIC documentation |
+| `epic.ui_manifest` | `epic.ui_manifest` | TUI branding (banner, accent colour, display name) |
+
+Set `BAMBOO_CHROMA_COLLECTION=epic_docs` when running the ePIC deployment to
+point the doc tools at the ePIC vector store.

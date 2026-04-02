@@ -10,7 +10,7 @@ Environment variables
 ---------------------
 PANDA_MCP_BASE_URL
     Full base URL of the PanDA MCP HTTP endpoint,
-    e.g. ``http://pandaserver01.sdcc.bnl.gov:25080/mcp/``.
+    e.g. ``https://aipanda120.cern.ch:8443/mcp/``.
     If unset the session is skipped and a warning is logged.
 PANDA_MCP_TOKEN
     Optional bearer token sent as ``Authorization: Bearer <token>``.
@@ -19,6 +19,17 @@ PANDA_MCP_ORIGIN
 PANDA_MCP_USE_SSE
     Set to ``"1"``, ``"true"``, or ``"yes"`` to use the legacy SSE transport
     instead of streamable-HTTP.  Streamable-HTTP is the default.
+PANDA_MCP_TLS_VERIFY
+    Set to ``"0"`` or ``"false"`` to disable TLS certificate verification.
+    **Use only for development/testing** — never in production.  The default
+    is to verify certificates using the system CA store.
+PANDA_MCP_CA_BUNDLE
+    Path to a CA certificate bundle (PEM) to use for TLS verification,
+    e.g. ``/etc/pki/tls/certs/ca-bundle.crt``.  When unset, the system
+    default CA store is used (via ``ssl.create_default_context()``), which
+    works on most Linux systems that have the CERN Grid CA installed as a
+    system package.  Set this explicitly if the CERN CA is only available
+    as a standalone PEM file.
 
 Typical usage (inside an asyncio task at server startup)::
 
@@ -36,6 +47,7 @@ import asyncio
 import importlib
 import logging
 import os
+import ssl
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -48,8 +60,9 @@ def _build_config() -> dict[str, Any] | None:
     """Read PanDA MCP connection config from environment variables.
 
     Returns:
-        Dict with keys ``url``, ``headers`` (dict), and ``use_sse`` (bool),
-        or ``None`` if ``PANDA_MCP_BASE_URL`` is not set.
+        Dict with keys ``url``, ``headers`` (dict), ``use_sse`` (bool),
+        ``ssl_context`` (ssl.SSLContext or False), or ``None`` if
+        ``PANDA_MCP_BASE_URL`` is not set.
     """
     base_url = os.environ.get("PANDA_MCP_BASE_URL", "").strip()
     if not base_url:
@@ -66,7 +79,30 @@ def _build_config() -> dict[str, Any] | None:
 
     use_sse = os.environ.get("PANDA_MCP_USE_SSE", "").lower() in {"1", "true", "yes"}
 
-    return {"url": base_url, "headers": headers or None, "use_sse": use_sse}
+    # TLS verification: False disables it entirely (dev/test only).
+    tls_verify_raw = os.environ.get("PANDA_MCP_TLS_VERIFY", "1").lower()
+    tls_verify = tls_verify_raw not in {"0", "false", "no"}
+
+    # Build SSL context (or pass False to httpx to disable verification).
+    ssl_value: ssl.SSLContext | bool
+    if not tls_verify:
+        _logger.warning(
+            "PANDA_MCP_TLS_VERIFY=0 — TLS certificate verification is DISABLED. "
+            "Use only for development/testing."
+        )
+        ssl_value = False
+    else:
+        ssl_value = ssl.create_default_context()
+        ca_bundle = os.environ.get("PANDA_MCP_CA_BUNDLE", "").strip()
+        if ca_bundle:
+            ssl_value.load_verify_locations(cafile=ca_bundle)
+
+    return {
+        "url": base_url,
+        "headers": headers or None,
+        "use_sse": use_sse,
+        "ssl_context": ssl_value,
+    }
 
 
 async def run_panda_mcp_session(shutdown_event: asyncio.Event) -> None:
@@ -101,6 +137,7 @@ async def run_panda_mcp_session(shutdown_event: asyncio.Event) -> None:
     url: str = config["url"]
     headers: dict[str, str] | None = config["headers"]
     use_sse: bool = config["use_sse"]
+    ssl_context: ssl.SSLContext | bool = config["ssl_context"]
 
     _logger.info(
         "Connecting to PanDA MCP server at %s (transport=%s)",
@@ -110,9 +147,9 @@ async def run_panda_mcp_session(shutdown_event: asyncio.Event) -> None:
 
     try:
         if use_sse:
-            await _run_sse_session(url, headers, shutdown_event)
+            await _run_sse_session(url, headers, ssl_context, shutdown_event)
         else:
-            await _run_http_session(url, headers, shutdown_event)
+            await _run_http_session(url, headers, ssl_context, shutdown_event)
     except asyncio.CancelledError:
         _logger.info("PanDA MCP session task cancelled — shutting down.")
         raise
@@ -125,6 +162,7 @@ async def run_panda_mcp_session(shutdown_event: asyncio.Event) -> None:
 async def _run_http_session(
     url: str,
     headers: dict[str, str] | None,
+    ssl_context: ssl.SSLContext | bool,
     shutdown_event: asyncio.Event,
 ) -> None:
     """Connect via streamable-HTTP transport and hold the session open.
@@ -132,6 +170,7 @@ async def _run_http_session(
     Args:
         url: PanDA MCP base URL.
         headers: Optional HTTP headers (auth, origin).
+        ssl_context: SSL context for TLS verification, or False to disable.
         shutdown_event: Set when the process is shutting down.
     """
     from bamboo.tools._mcp_caller import get_mcp_caller  # type: ignore[import-untyped]
@@ -146,7 +185,11 @@ async def _run_http_session(
         _logger.error("streamable_http_client not available: %s", exc)
         return
 
-    http_client = httpx.AsyncClient(headers=headers or {}, timeout=httpx.Timeout(30.0))
+    http_client = httpx.AsyncClient(
+        headers=headers or {},
+        timeout=httpx.Timeout(30.0),
+        verify=ssl_context,
+    )
     try:
         transport_cm = http_transport_fn(
             url,
@@ -169,6 +212,7 @@ async def _run_http_session(
 async def _run_sse_session(
     url: str,
     headers: dict[str, str] | None,
+    ssl_context: ssl.SSLContext | bool,
     shutdown_event: asyncio.Event,
 ) -> None:
     """Connect via SSE transport and hold the session open.
@@ -176,9 +220,12 @@ async def _run_sse_session(
     Args:
         url: PanDA MCP base URL.
         headers: Optional HTTP headers (auth, origin).
+        ssl_context: SSL context for TLS verification, or False to disable.
         shutdown_event: Set when the process is shutting down.
     """
     from bamboo.tools._mcp_caller import get_mcp_caller  # type: ignore[import-untyped]
+
+    import httpx
 
     try:
         from mcp.client.sse import sse_client  # type: ignore[import-untyped]
@@ -187,7 +234,17 @@ async def _run_sse_session(
         _logger.error("SSE client not available: %s", exc)
         return
 
-    async with sse_client(url, headers=headers) as (read_stream, write_stream):
+    # Pass an explicit httpx client factory so we control the SSL context.
+    # The mcp sse_client accepts httpx_client_factory as a keyword argument.
+    def _make_client(**_kwargs: Any) -> httpx.AsyncClient:
+        """Return an AsyncClient with the configured SSL context and headers."""
+        return httpx.AsyncClient(
+            headers=headers or {},
+            timeout=httpx.Timeout(30.0),
+            verify=ssl_context,
+        )
+
+    async with sse_client(url, httpx_client_factory=_make_client) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             get_mcp_caller().register_session(PANDA_MCP_SERVER_NAME, session)

@@ -23,10 +23,10 @@
 These tests are designed to work both when Bamboo is installed (editable or
 wheel) and when running directly from a source checkout.
 
-In a clean checkout, the `bamboo` (core) and `askpanda_atlas` (plugin) packages
-live under `core/` and `packages/askpanda_atlas/` respectively. Add these
-directories to `sys.path` so `pytest` can import them without requiring an
-editable install.
+In a clean checkout, the `bamboo` (core), `askpanda_atlas`, and
+`askpanda_epic` packages live under `core/`, `packages/askpanda_atlas/`,
+and `packages/askpanda_epic/` respectively. Add these directories to
+`sys.path` so `pytest` can import them without requiring an editable install.
 """
 
 from __future__ import annotations
@@ -41,8 +41,9 @@ def pytest_configure() -> None:
 
     core_dir = repo_root / "core"
     atlas_pkg_dir = repo_root / "packages" / "askpanda_atlas"
+    epic_pkg_dir = repo_root / "packages" / "askpanda_epic"
 
-    for p in (core_dir, atlas_pkg_dir):
+    for p in (core_dir, atlas_pkg_dir, epic_pkg_dir):
         s = str(p)
         if s not in sys.path:
             sys.path.insert(0, s)

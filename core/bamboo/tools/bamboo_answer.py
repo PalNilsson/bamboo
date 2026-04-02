@@ -1,4 +1,4 @@
-"""Bamboo answer tool — ATLAS-focused orchestration.
+"""Bamboo answer tool — multi-experiment PanDA orchestration.
 
 Routing (delegated to LLM planner)
 ------------------------------------
@@ -91,7 +91,7 @@ _ACK_RE: re.Pattern[str] = re.compile(
 
 _GREETING_RESPONSE: str = (
     "Hello! I'm AskPanDA — ask me about PanDA tasks, jobs, pilots, "
-    "computing sites, or ATLAS grid workflows. "
+    "computing sites, or ATLAS and ePIC grid workflows. "
     "Try asking about a task ID, a failed job, or a site's current status."
 )
 
@@ -1248,7 +1248,7 @@ async def _run_fast_path_intercepts(
 
 
 class BambooAnswerTool:
-    """MCP tool that answers questions about ATLAS PanDA tasks and jobs.
+    """MCP tool that answers questions about ATLAS, ePIC PanDA tasks and jobs.
 
     Uses the LLM planner (``bamboo_plan`` with ``execute=True``) for
     routing and synthesis, replacing the previous regex-dispatch approach.
@@ -1265,11 +1265,11 @@ class BambooAnswerTool:
         return {
             "name": "bamboo_answer",
             "description": (
-                "Answer questions about PanDA tasks, jobs, and ATLAS workflows. "
+                "Answer questions about PanDA tasks, jobs, and ATLAS or ePIC workflows. "
                 "Automatically identifies whether the question concerns a specific "
                 "task ID, job ID, log failure, or general documentation, calls the "
                 "appropriate tool, and returns a synthesised natural-language answer. "
-                "Use this as the single entry point for all PanDA/ATLAS questions."
+                "Use this as the single entry point for all PanDA/ATLAS/ePIC questions."
             ),
             "inputSchema": {
                 "type": "object",
