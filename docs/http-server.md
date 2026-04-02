@@ -187,19 +187,22 @@ python interfaces/textual/chat.py --transport http
 
 ### With authentication
 
-The TUI does not currently have a `--token` CLI flag.  Pass the Bearer token
-via the `MCP_BEARER_TOKEN` environment variable, or set it in
-`bamboo_env.sh`:
+Pass the Bearer token via `--token` or set it in `bamboo_env.sh`:
 
 ```bash
+# Via flag
+python interfaces/textual/chat.py \
+  --transport http \
+  --http-url http://<your-hostname>:8000/mcp \
+  --token s3cr3t-token-for-alice
+
+# Via environment variable (add to bamboo_env.sh)
 export MCP_BEARER_TOKEN="s3cr3t-token-for-alice"
 python interfaces/textual/chat.py --transport http \
   --http-url http://<your-hostname>:8000/mcp
 ```
 
-> **Note:** if `MCP_BEARER_TOKEN` is not yet wired into the TUI in your
-> version, set the header at the OS level using a proxy, or ask the server
-> operator to run without auth on a subnet-restricted port.
+The token is sent as `Authorization: Bearer <token>` on every request.
 
 ---
 

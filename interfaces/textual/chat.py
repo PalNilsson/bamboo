@@ -1580,6 +1580,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--transport", choices=["stdio", "http"], required=True)
     ap.add_argument("--http-url", default=os.getenv("MCP_URL", "http://localhost:8000/mcp"))
+    ap.add_argument(
+        "--token",
+        default=os.getenv("MCP_BEARER_TOKEN", ""),
+        help="Bearer token for HTTP server authentication (or set MCP_BEARER_TOKEN).",
+    )
     ap.add_argument("--plugin", default=DEFAULT_PLUGIN)
     ap.add_argument("--terminate-on-close", action="store_true", default=True)
 
@@ -1590,7 +1595,15 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.transport == "http":
-        cfg = MCPServerConfig(transport="http", http_url=args.http_url, terminate_on_close=args.terminate_on_close)
+        http_headers: dict[str, str] | None = (
+            {"Authorization": f"Bearer {args.token}"} if args.token else None
+        )
+        cfg = MCPServerConfig(
+            transport="http",
+            http_url=args.http_url,
+            http_headers=http_headers,
+            terminate_on_close=args.terminate_on_close,
+        )
     else:
         _trace_file = os.path.join(tempfile.gettempdir(), f"bamboo_trace_{os.getpid()}.jsonl")
         _stdio_env = os.environ.copy()
