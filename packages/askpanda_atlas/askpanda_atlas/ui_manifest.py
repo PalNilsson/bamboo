@@ -63,7 +63,7 @@ class AtlasUiManifestTool:
         return {
             "name": "atlas.ui_manifest",
             "description": "Return UI branding metadata (banner, display name, help text, accent).",
-            "inputSchema": {"type": "object", "properties": {}},
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         }
 
     async def call(self, arguments: dict[str, Any]) -> list[dict[str, Any]]:

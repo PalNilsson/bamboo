@@ -236,11 +236,15 @@ async def _run_sse_session(
 
     # Pass an explicit httpx client factory so we control the SSL context.
     # The mcp sse_client accepts httpx_client_factory as a keyword argument.
-    def _make_client(**_kwargs: Any) -> httpx.AsyncClient:
+    def _make_client(
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient:
         """Return an AsyncClient with the configured SSL context and headers."""
         return httpx.AsyncClient(
             headers=headers or {},
-            timeout=httpx.Timeout(30.0),
+            timeout=timeout or httpx.Timeout(30.0),
             verify=ssl_context,
         )
 

@@ -12,6 +12,45 @@ Structured evidence is always returned alongside natural-language answers.
 
 ---
 
+## Contributing
+
+### Repository setup
+
+The canonical repository is at **https://github.com/BNLNPPS/bamboo-mcp**. Development follows a standard fork-and-pull-request workflow.
+
+**First-time setup:**
+
+```bash
+# Clone your fork
+git clone https://github.com/<your-username>/bamboo-mcp.git
+cd bamboo-mcp
+
+# Add the canonical repo as upstream
+git remote add upstream https://github.com/BNLNPPS/bamboo-mcp.git
+
+# Verify
+git remote -v
+# origin    https://github.com/<your-username>/bamboo-mcp.git (fetch)
+# origin    https://github.com/<your-username>/bamboo-mcp.git (push)
+# upstream  https://github.com/BNLNPPS/bamboo-mcp.git (fetch)
+# upstream  https://github.com/BNLNPPS/bamboo-mcp.git (push)
+```
+
+**Day-to-day workflow:**
+
+```bash
+# Push your changes to your fork
+git push origin master
+
+# Open a pull request from your fork to BNLNPPS/bamboo-mcp via GitHub
+
+# Keep your fork in sync with upstream
+git fetch upstream
+git merge upstream/master
+```
+
+---
+
 ## Quick start
 
 ### 1. Create a virtual environment
