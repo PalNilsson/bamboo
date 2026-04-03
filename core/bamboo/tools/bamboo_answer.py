@@ -1,4 +1,4 @@
-"""Bamboo answer tool — multi-experiment PanDA orchestration.
+"""Bamboo answer tool — ATLAS-focused orchestration.
 
 Routing (delegated to LLM planner)
 ------------------------------------
@@ -91,7 +91,7 @@ _ACK_RE: re.Pattern[str] = re.compile(
 
 _GREETING_RESPONSE: str = (
     "Hello! I'm AskPanDA — ask me about PanDA tasks, jobs, pilots, "
-    "computing sites, or ATLAS and ePIC grid workflows. "
+    "computing sites, or ATLAS grid workflows. "
     "Try asking about a task ID, a failed job, or a site's current status."
 )
 
@@ -879,6 +879,7 @@ _CONTEXTUAL_FOLLOWUP_RE = re.compile(
     r"those|them|they|their|"
     r"that task|that job|the task|the job|the jobs|the results?|"
     r"of those|of them|of the|"
+    r"corresponding|"
     r"it|its"
     r")\b",
     re.IGNORECASE,
@@ -896,6 +897,7 @@ _DOMAIN_WORD_RE = re.compile(
     r"running|started|starting|"
     r"transferring|transferred|"
     r"activated|activat(?:ed|ing)|"
+    r"panda[\s_-]?ids?|pandaid|"
     r"piloterror(?:code|diag)|"
     r"error\s+code|error\s+codes|"
     r"top\s+errors?|"
@@ -1248,7 +1250,7 @@ async def _run_fast_path_intercepts(
 
 
 class BambooAnswerTool:
-    """MCP tool that answers questions about ATLAS, ePIC PanDA tasks and jobs.
+    """MCP tool that answers questions about ATLAS PanDA tasks and jobs.
 
     Uses the LLM planner (``bamboo_plan`` with ``execute=True``) for
     routing and synthesis, replacing the previous regex-dispatch approach.
@@ -1265,11 +1267,11 @@ class BambooAnswerTool:
         return {
             "name": "bamboo_answer",
             "description": (
-                "Answer questions about PanDA tasks, jobs, and ATLAS or ePIC workflows. "
+                "Answer questions about PanDA tasks, jobs, and ATLAS workflows. "
                 "Automatically identifies whether the question concerns a specific "
                 "task ID, job ID, log failure, or general documentation, calls the "
                 "appropriate tool, and returns a synthesised natural-language answer. "
-                "Use this as the single entry point for all PanDA/ATLAS/ePIC questions."
+                "Use this as the single entry point for all PanDA/ATLAS questions."
             ),
             "inputSchema": {
                 "type": "object",

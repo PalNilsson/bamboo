@@ -180,6 +180,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | Doc | Contents |
 |---|---|
 | [`docs/developer.md`](docs/developer.md) | Full setup, editable installs, testing, linting |
+| [`docs/http-server.md`](docs/http-server.md) | Running the HTTP server for shared/testbed deployments |
 | [`docs/mcp.md`](docs/mcp.md) | MCP protocol, tool contracts, LLM roles, orchestration |
 | [`docs/interfaces.md`](docs/interfaces.md) | TUI, Streamlit UI, HTTP transport, context memory |
 | [`docs/plugins.md`](docs/plugins.md) | Writing and registering plugins |

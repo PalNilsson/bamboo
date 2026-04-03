@@ -80,13 +80,34 @@ _SYSTEM_TASK: str = (
     "  include a monitor link.\n"
     "- If evidence indicates a non-JSON or HTTP error (but not 404): explain that BigPanDA returned\n"
     "  an unexpected response and include the monitor_url so the user can check manually.\n"
+    "- TASK STATUS: ``task_status`` is the ONLY authoritative source for the overall task\n"
+    "  outcome. Report it verbatim (e.g. \'finished\', \'failed\', \'running\'). The jobs endpoint\n"
+    "  returns only a SAMPLE of jobs (typically failed ones), so jobs_by_status reflects that\n"
+    "  sample only — NOT all jobs. A task with task_status=\'finished\' completed successfully\n"
+    "  even if the sample contains only failed jobs. NEVER infer the task outcome from\n"
+    "  jobs_by_status. Always report task_status first, then the job breakdown.\n"
+    "- JOB COUNTS: Use dsinfo[\'nfilesfinished\'] and dsinfo[\'nfilesfailed\'] for the\n"
+    "  authoritative finished/failed counts when present — these are not inflated by retries.\n"
+    "  Fall back to sum(jobs_by_piloterrorcode.values()) for failed count if dsinfo is absent.\n"
+    "  jobs_by_status may be inflated by retries. A single job appears in BOTH\n"
+    "  jobs_by_piloterrorcode AND errs_by_count (different views) — do NOT add them together.\n"
+    "- TERMINOLOGY: When reporting nfilesfinished/nfilesfailed from dsinfo, call them JOBS not\n"
+    "  files (e.g. \'49,988 jobs finished, 12 jobs failed\'). These are grid job counts, not\n"
+    "  dataset file counts. Use \'files\' only when describing dataset contents.\n"
+    "- PANDA IDs: The evidence has a ``failed_pandaids`` field — a plain list of integer\n"
+    "  PanDA job IDs for the failed jobs (e.g. [7073513639, 7073514709, ...]). When the\n"
+    "  user asks for job IDs, list every value in failed_pandaids. Note it is a sample\n"
+    "  (up to 20) and point to the monitor URL for the complete list.\n"
+    "- Provide a thorough summary covering: overall status, dataset name, job counts\n"
+    "  (finished, failed, total), failure details (error codes and root cause), computing\n"
+    "  sites involved, and any other fields relevant to the question. Use bullet points.\n"
     "- Otherwise: answer the question directly using only fields present in the metadata.\n"
     "- NEVER infer, guess, or derive values not explicitly in the data. If a requested value is\n"
     "  absent, say it is not available in the metadata rather than inventing it.\n"
     "- The Job list section below the metadata lists actual PanDA job IDs. Use ONLY those IDs\n"
     "  when answering questions about pandaids/job IDs. If the section says no jobs were\n"
     "  returned, say so — never derive job IDs from dataset IDs or any other field.\n"
-    "- Be concise. Include the BigPanDA monitor URL as plain text at the end in non-error cases,\n"
+    "- Include the BigPanDA monitor URL as plain text at the end in non-error cases,\n"
     "  e.g.: Monitor: https://bigpanda.cern.ch/task/12345/\n"
 )
 
@@ -660,12 +681,16 @@ async def execute_plan(
         # Unpack JSON evidence; fall back to raw text if unpacking yields nothing.
         unpacked = unpack_tool_result(raw_result)
         if unpacked:
-            # Store the full evidence (including raw_payload) for /json and /inspect.
-            _last_evidence_store[tool_name] = unpacked
+            # Store evidence for /inspect and /json — strip pandaid_list (can be
+            # 50k entries) to prevent /inspect timeouts. raw_payload kept for /json.
+            _STORE_STRIP = {"pandaid_list"}
+            _last_evidence_store[tool_name] = {
+                k: v for k, v in unpacked.items() if k not in _STORE_STRIP
+            }
             _last_evidence_store["last_tool"] = tool_name
-            # Strip raw_payload before synthesis — it can be very large and the
-            # LLM should only see the compact structured evidence fields.
-            llm_evidence = {k: v for k, v in unpacked.items() if k != "raw_payload"}
+            # Strip raw_payload and pandaid_list from LLM synthesis input.
+            _LLM_STRIP = {"raw_payload", "pandaid_list"}
+            llm_evidence = {k: v for k, v in unpacked.items() if k not in _LLM_STRIP}
             evidence_parts.append(f"[{tool_name}]\n{_compact_json(llm_evidence)}")
         else:
             raw_text = raw_result[0].get("text", "") if raw_result else ""
@@ -691,7 +716,7 @@ async def execute_plan(
     return text_content(body)
 
 
-def _compact_json(obj: Any, limit: int = 6000) -> str:
+def _compact_json(obj: Any, limit: int = 12000) -> str:
     """Compact JSON for prompts, bounded to ``limit`` characters.
 
     Args:

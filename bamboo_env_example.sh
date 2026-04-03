@@ -166,4 +166,23 @@ export BAMBOO_CHROMA_COLLECTION="document_monitor_agent"
 # History is held in-memory in the TUI only; the server is always stateless.
 # export BAMBOO_HISTORY_TURNS="10"
 
+# Maximum tokens for LLM synthesis responses.
+# Raise these for longer, more detailed answers — at the cost of higher latency.
+# export BAMBOO_SYNTHESIS_MAX_TOKENS="2048"   # fresh questions (default: 2048)
+# export BAMBOO_FOLLOWUP_MAX_TOKENS="600"     # follow-up expansions (default: 600)
+
 echo "AskPanDA LLM environment variables loaded (example configuration)."
+
+########################################
+# STREAMLIT / HTTP CLIENT
+########################################
+
+# Default MCP server URL for the Streamlit app and TUI in HTTP transport mode.
+# export MCP_URL="http://localhost:8000/mcp"
+
+# Bearer token for authenticating to a Bamboo HTTP server.
+# export MCP_BEARER_TOKEN=""
+
+# Timeout in seconds for MCP tool calls in the Streamlit sync client.
+# Large task status fetches can take 60-90 s for tasks with thousands of jobs.
+# export BAMBOO_MCP_CLIENT_TIMEOUT="120"

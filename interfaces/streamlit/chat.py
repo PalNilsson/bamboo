@@ -1,254 +1,131 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+"""AskPanDA Streamlit Chat UI.
 
-"""
-AskPanDA Streamlit Chat UI.
-
-This Streamlit app connects to an AskPanDA MCP server using either:
-  - STDIO transport (dev): spawns `python -m bamboo.server`
-  - Streamable HTTP transport (prod): connects to `http://host:port/mcp`
-
-Key Streamlit constraints handled here:
-  - No widget calls inside cached functions.
-  - The MCP client is wrapped in a synchronous interface for Streamlit.
-
-Expected companion module:
-  interfaces/shared/mcp_client.py
-
-It must expose:
-  - MCPServerConfig
-  - MCPClientSync  (sync wrapper with methods: list_tools, list_prompts, call_tool, close)
+Connects to an AskPanDA MCP server via:
+  - Streamable HTTP transport (production): connects to ``http://host:port/mcp``
+  - STDIO transport (development): spawns ``python -m bamboo.server``
 
 Run:
   streamlit run interfaces/streamlit/chat.py
+
+Key design decisions
+--------------------
+- ``bamboo_answer`` is always the answer tool — ``_guess_auto_tool`` is gone.
+- Fast-path routing defaults to ON (matches server default).
+- Bearer token, URL, and plugin are all user-visible sidebar controls.
+- After each response, expanders show Tracing, Costs, Evidence (inspect),
+  and Raw JSON — equivalent to TUI /tracing, /costs, /inspect, /json.
+- LLM info and experiment display name are fetched on connect via
+  ``bamboo_health`` and ``<plugin>.ui_manifest`` respectively.
+- Tracing works in stdio mode (server writes to a temp file we read back).
+  In HTTP mode, span data is not available client-side; the expanders
+  explain this and show what information is available.
 """
 # pylint: disable=no-member  # streamlit uses dynamic attributes
-
 from __future__ import annotations
 
 import json
 import os
 import sys
+import tempfile
 import traceback
-from dataclasses import dataclass
-from collections.abc import Sequence
+from collections.abc import Sequence  # noqa: F401  (kept for type annotations in helpers)
+from pathlib import Path
 from typing import Any
 
-import textwrap
-import streamlit as st
+# ---------------------------------------------------------------------------
+# Path bootstrap — makes ``interfaces`` importable when Streamlit runs this
+# script directly (i.e. without ``pip install -e .`` at the repo root).
+# Inserts the repo root (two levels up from this file) onto sys.path if it
+# is not already present.
+# ---------------------------------------------------------------------------
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig
+import streamlit as st  # noqa: E402
 
-# Maximum user+assistant turn *pairs* kept in context.  Matches the TUI default.
+from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 _DEFAULT_HISTORY_TURNS = 10
 try:
     _MAX_HISTORY_TURNS: int = int(os.getenv("BAMBOO_HISTORY_TURNS", str(_DEFAULT_HISTORY_TURNS)))
 except ValueError:
     _MAX_HISTORY_TURNS = _DEFAULT_HISTORY_TURNS
 
-# Preferred answer tool candidates, in priority order.
-_ANSWER_TOOL_CANDIDATES = ["bamboo_answer", "askpanda_answer", "bamboo_plan"]
+_ANSWER_TOOL = "bamboo_answer"
+_DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
 
-# --- UI tweaks: pin chat input to bottom and neutralize focus styling ---
-_CHAT_CSS = textwrap.dedent(
-    """
-    <style>
-/* ChatGPT-like pinned input at the bottom, but avoid overlapping the sidebar */
-[data-testid="stChatInput"] {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 9999;
-  background: var(--background-color, #fff);
-  padding: 0.75rem 1rem 0.75rem 1rem;
-  border-top: none !important; /* remove separator line */
-  box-shadow: none !important;
+# Prices in USD per 1 million tokens: (input_rate, output_rate).
+# Verify against current provider docs; unknown models fall back to _DEFAULT_COST.
+_MODEL_COST_PER_MTOK: dict[str, tuple[float, float]] = {
+    # Mistral
+    "mistral-large-latest": (2.00, 6.00),
+    "mistral-large-2411": (2.00, 6.00),
+    "mistral-small-latest": (0.20, 0.60),
+    "mistral-small-2501": (0.20, 0.60),
+    "open-mistral-nemo": (0.15, 0.15),
+    # Anthropic
+    "claude-opus-4-5": (15.00, 75.00),
+    "claude-sonnet-4-5": (3.00, 15.00),
+    "claude-haiku-4-5": (0.80, 4.00),
+    "claude-3-5-sonnet-20241022": (3.00, 15.00),
+    "claude-3-5-haiku-20241022": (0.80, 4.00),
+    # OpenAI
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4-turbo": (10.00, 30.00),
+    "gpt-3.5-turbo": (0.50, 1.50),
+    # Google
+    "gemini-1.5-pro": (1.25, 5.00),
+    "gemini-1.5-flash": (0.075, 0.30),
+    "gemini-2.0-flash": (0.10, 0.40),
 }
+_DEFAULT_COST: tuple[float, float] = (1.00, 3.00)
 
-/* When a sidebar is present, Streamlit typically reserves ~21rem on the left.
-   This prevents the input from sliding underneath the left panel. */
-[data-testid="stChatInput"] {
-  padding-left: calc(1rem + 21rem);
-}
-
-/* On smaller screens (or when sidebar overlays), don't reserve left space. */
-@media (max-width: 900px) {
-  [data-testid="stChatInput"] {
-    padding-left: 1rem;
-  }
-}
-
-/* Give the main content room so it doesn't hide behind the fixed input */
-.block-container {
-  padding-bottom: 6.5rem !important;
-}
-
-/* Aggressively neutralize focus styles to avoid red borders/rings */
-[data-testid="stChatInput"] *:focus,
-[data-testid="stChatInput"] *:focus-visible {
-  outline: none !important;
-  box-shadow: none !important;
-}
-
-/* Ensure the textarea border stays neutral even on focus */
-[data-testid="stChatInput"] textarea,
-[data-testid="stChatInput"] input {
-  border-color: rgba(128,128,128,0.35) !important;
-}
-
-[data-testid="stChatInput"] textarea:focus,
-[data-testid="stChatInput"] textarea:focus-visible,
-[data-testid="stChatInput"] input:focus,
-[data-testid="stChatInput"] input:focus-visible {
-  border-color: rgba(128,128,128,0.45) !important;
-}
-</style>
-    """
-)
-
-# CSS will be applied in main() after st.set_page_config()
+# ---------------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------------
 
 
-# -----------------------------
-# Types
-# -----------------------------
-JSONDict = dict[str, Any]
-JSONList = list[Any]
-
-
-@dataclass(frozen=True)
-class UIConfig:
-    """Configuration values gathered from Streamlit widgets.
-
-    Attributes:
-        transport: Connection transport ("stdio" or "http").
-        stdio_command: Python executable to run the MCP server in stdio mode.
-        stdio_args_json: JSON-encoded list of args for the stdio server command.
-        stdio_env_json: JSON-encoded dict of environment vars for stdio.
-        http_url: MCP streamable HTTP URL (e.g., http://localhost:8000/mcp).
-    """
-
-    transport: str
-    stdio_command: str
-    stdio_args_json: str
-    stdio_env_json: str
-    http_url: str
-
-
-# -----------------------------
-# Helpers (pure, no widgets)
-# -----------------------------
-def _safe_parse_json_list(value: str, fallback: list[str] | None = None) -> list[str]:
-    """Parse a JSON list of strings, returning a fallback on error.
-
-    Args:
-        value: JSON string that should decode to a list.
-        fallback: Returned when parsing fails.
-
-    Returns:
-        A list of strings.
-    """
-    if fallback is None:
-        fallback = ["-m", "bamboo.server"]
-    try:
-        parsed = json.loads(value)
-        if not isinstance(parsed, list):
-            return fallback
-        out: list[str] = []
-        for item in parsed:
-            out.append(str(item))
-        return out
-    except Exception:  # pylint: disable=broad-exception-caught
-        return fallback
-
-
-def _safe_parse_json_dict(value: str) -> dict[str, str] | None:
-    """Parse a JSON dict of string keys/values.
-
-    Args:
-        value: JSON string that should decode to a dict. Empty string => None.
-
-    Returns:
-        dict[str, str] if valid, otherwise None.
-    """
-    if not value.strip():
-        return None
-    try:
-        parsed = json.loads(value)
-        if not isinstance(parsed, dict):
-            return None
-        out: dict[str, str] = {}
-        for k, v in parsed.items():
-            out[str(k)] = str(v)
-        return out
-    except Exception:  # pylint: disable=broad-exception-caught
-        return None
-
-
-def _extract_text_from_content(content_items: Any) -> str:
+def _extract_text(content_items: Any) -> str:
     """Extract human-readable text from MCP content items.
 
-    MCP tool calls commonly return a list of content objects/dicts like:
-      [{"type": "text", "text": "..."}]
-
     Args:
-        content_items: Tool response.
+        content_items: Tool response — list of MCPContent dicts, a single
+            dict, a string, or any object with a ``content`` attribute.
 
     Returns:
-        Concatenated text content.
+        Concatenated text content, or empty string.
     """
     if content_items is None:
         return ""
-
-    # If response is an object with `.content`, try that.
     if hasattr(content_items, "content"):
         content_items = getattr(content_items, "content")
-
-    parts: list[str] = []
-
     if isinstance(content_items, str):
         return content_items
-
     if isinstance(content_items, dict):
-        # Single dict response
         if content_items.get("type") == "text":
             return str(content_items.get("text", ""))
         return json.dumps(content_items, indent=2)
-
     if isinstance(content_items, list):
+        parts: list[str] = []
         for item in content_items:
             if isinstance(item, str):
                 parts.append(item)
-                continue
-            if isinstance(item, dict):
+            elif isinstance(item, dict):
                 if item.get("type") == "text":
                     parts.append(str(item.get("text", "")))
                 else:
                     parts.append(json.dumps(item, indent=2))
-                continue
-            # Unknown object: try attributes
-            if hasattr(item, "type") and getattr(item, "type") == "text" and hasattr(item, "text"):
+            elif hasattr(item, "type") and getattr(item, "type") == "text" and hasattr(item, "text"):
                 parts.append(str(getattr(item, "text")))
             else:
                 parts.append(str(item))
-        return "\n".join([p for p in parts if p.strip()])
-
-    # Fallback
+        return "\n".join(p for p in parts if p.strip())
     try:
         return json.dumps(content_items, indent=2)
     except Exception:  # pylint: disable=broad-exception-caught
@@ -256,422 +133,677 @@ def _extract_text_from_content(content_items: Any) -> str:
 
 
 def _tool_names(tools_result: Any) -> list[str]:
-    """Extract tool names from `session.list_tools()` results.
-
-    Different MCP versions return different shapes:
-      - list of Tool objects
-      - dict-like tool definitions
-      - object with `.tools` list
+    """Extract tool names from ``session.list_tools()`` results.
 
     Args:
-        tools_result: The return value of MCP list_tools.
+        tools_result: Return value of MCP list_tools.
 
     Returns:
-        Sorted list of tool names.
+        Sorted list of tool name strings.
     """
-    # unwrap `.tools` if present
     if hasattr(tools_result, "tools"):
         tools_result = getattr(tools_result, "tools")
-
     names: list[str] = []
     if tools_result is None:
         return names
-
     if isinstance(tools_result, list):
         for t in tools_result:
             if isinstance(t, dict) and "name" in t:
                 names.append(str(t["name"]))
             elif hasattr(t, "name"):
                 names.append(str(getattr(t, "name")))
-            else:
-                # last resort
-                names.append(str(t))
     elif isinstance(tools_result, dict):
-        # sometimes tools are returned as {"tools": [...]}
         inner = tools_result.get("tools")
         if isinstance(inner, list):
             return _tool_names(inner)
     return sorted(set(names))
 
 
-def _prompt_names(prompts_result: Any) -> list[str]:
-    """Extract prompt names from `session.list_prompts()` results.
-
-    Args:
-        prompts_result: The return value of MCP list_prompts.
-
-    Returns:
-        Sorted list of prompt names.
-    """
-    if hasattr(prompts_result, "prompts"):
-        prompts_result = getattr(prompts_result, "prompts")
-
-    names: list[str] = []
-    if prompts_result is None:
-        return names
-
-    if isinstance(prompts_result, list):
-        for p in prompts_result:
-            if isinstance(p, dict) and "name" in p:
-                names.append(str(p["name"]))
-            elif hasattr(p, "name"):
-                names.append(str(getattr(p, "name")))
-            else:
-                names.append(str(p))
-    elif isinstance(prompts_result, dict):
-        inner = prompts_result.get("prompts")
-        if isinstance(inner, list):
-            return _prompt_names(inner)
-    return sorted(set(names))
-
-
 def _cap_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Trim a messages list to at most ``_MAX_HISTORY_TURNS`` user+assistant pairs.
-
-    Each pair consists of one user message and one assistant reply (2 entries).
-    The most recent turns are kept; older turns are discarded from the front.
+    """Trim messages to at most ``_MAX_HISTORY_TURNS`` user+assistant pairs.
 
     Args:
-        messages: Current full message list.
+        messages: Full message list.
 
     Returns:
-        Trimmed message list, at most ``_MAX_HISTORY_TURNS * 2`` entries long.
+        Trimmed list keeping the most recent turns.
     """
-    max_messages = _MAX_HISTORY_TURNS * 2
-    if len(messages) > max_messages:
-        return messages[-max_messages:]
-    return messages
+    max_msgs = _MAX_HISTORY_TURNS * 2
+    return messages[-max_msgs:] if len(messages) > max_msgs else messages
 
 
-def _detect_answer_tool(tool_names: Sequence[str]) -> str:
-    """Select the preferred answer tool from available tools.
-
-    Checks ``_ANSWER_TOOL_CANDIDATES`` in priority order, then falls back to
-    any tool containing ``"answer"`` in its name.
+def _estimate_cost(spans: list[dict[str, Any]]) -> dict[str, Any]:
+    """Estimate LLM cost from trace spans.
 
     Args:
-        tool_names: Tool names returned by the MCP server.
+        spans: Parsed trace span dicts from the trace file.
 
     Returns:
-        Name of the best available answer tool, or ``"bamboo_answer"`` as a
-        hard fallback if nothing matches.
+        Dict with ``calls``, ``total_input``, ``total_output``,
+        ``total_tokens``, ``total_cost_usd``, and ``unknown_models``.
     """
-    for candidate in _ANSWER_TOOL_CANDIDATES:
-        if candidate in tool_names:
-            return candidate
-    for name in tool_names:
-        if "answer" in name:
-            return name
-    return "bamboo_answer"
+    calls: list[dict[str, Any]] = []
+    unknown_models: list[str] = []
+    total_input = total_output = 0
+    total_cost = 0.0
+
+    for span in spans:
+        if span.get("event") != "llm_call":
+            continue
+        model = str(span.get("model", "unknown"))
+        provider = str(span.get("provider", ""))
+        inp = int(span.get("input_tokens") or 0)
+        out = int(span.get("output_tokens") or 0)
+        duration_ms = float(span.get("duration_ms", 0.0))
+
+        rate = _MODEL_COST_PER_MTOK.get(model) or _MODEL_COST_PER_MTOK.get(model.lower())
+        if rate is None:
+            unknown_models.append(model)
+            rate = _DEFAULT_COST
+
+        call_cost = (inp / 1_000_000) * rate[0] + (out / 1_000_000) * rate[1]
+        calls.append({
+            "provider": provider, "model": model,
+            "input_tokens": inp, "output_tokens": out,
+            "duration_ms": duration_ms, "cost_usd": call_cost,
+            "rate_in": rate[0], "rate_out": rate[1],
+        })
+        total_input += inp
+        total_output += out
+        total_cost += call_cost
+
+    return {
+        "calls": calls,
+        "total_input": total_input, "total_output": total_output,
+        "total_tokens": total_input + total_output,
+        "total_cost_usd": total_cost,
+        "unknown_models": list(set(unknown_models)),
+    }
 
 
-def _guess_auto_tool(question: str, available_tools: Sequence[str]) -> tuple[str, JSONDict]:
-    """Pick a reasonable tool + arguments based on a question (light heuristic).
-
-    This avoids requiring a server-side orchestration tool while you're bootstrapping.
+def _read_spans(trace_file: str, from_pos: int) -> list[dict[str, Any]]:
+    """Read bamboo trace spans written since ``from_pos``.
 
     Args:
-        question: User question.
-        available_tools: Known tool names from the server.
+        trace_file: Path to the NDJSON trace file.
+        from_pos: Byte offset to start reading from.
 
     Returns:
-        (tool_name, args)
+        List of parsed span dicts.
     """
-    q = question.lower().strip()
-
-    # Prefer a single orchestration tool if you add it later.
-    for candidate in ("askpanda_answer", "askpanda_chat", "askpanda_query"):
-        if candidate in available_tools:
-            return candidate, {"query": question}
-
-    if "log" in q or "traceback" in q or "error" in q or "failed" in q:
-        if "panda_log_analysis" in available_tools:
-            return "panda_log_analysis", {"log_text": question}
-
-    # crude task id extraction
-    if "task" in q or "jedi" in q:
-        if "panda_task_status" in available_tools:
-            return "panda_task_status", {"task_id": question}
-
-    if "queue" in q or "site" in q:
-        if "panda_queue_info" in available_tools:
-            return "panda_queue_info", {"site": question}
-
-    if "panda_doc_search" in available_tools:
-        return "panda_doc_search", {"query": question, "k": 5}
-
-    # fallback: health
-    if "askpanda_health" in available_tools:
-        return "askpanda_health", {}
-
-    # ultimate fallback: first available tool
-    if available_tools:
-        return available_tools[0], {}
-
-    return "askpanda_health", {}
+    spans: list[dict[str, Any]] = []
+    try:
+        with open(trace_file, "r", encoding="utf-8") as fh:
+            fh.seek(from_pos)
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict) and obj.get("bamboo_trace"):
+                        spans.append(obj)
+                except json.JSONDecodeError:
+                    pass
+    except OSError:
+        pass
+    return spans
 
 
-# -----------------------------
-# Cached MCP client factory (NO WIDGETS INSIDE)
-# -----------------------------
+def _trace_file_size(trace_file: str) -> int:
+    """Return current byte size of the trace file, or 0 if absent.
+
+    Args:
+        trace_file: Path to the trace file.
+
+    Returns:
+        File size in bytes.
+    """
+    try:
+        return os.path.getsize(trace_file)
+    except OSError:
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Cached MCP client (NO widget calls inside)
+# ---------------------------------------------------------------------------
+
 @st.cache_resource
-def _get_mcp_client(cfg: UIConfig) -> MCPClientSync:
-    """Create and cache an MCP client based on UIConfig.
+def _get_mcp_client(
+    transport: str,
+    http_url: str,
+    bearer_token: str,
+    stdio_command: str,
+    trace_file: str,
+) -> MCPClientSync:
+    """Create and cache an MCPClientSync.
 
-    IMPORTANT: No Streamlit widgets may be called here.
+    All parameters are plain scalars so Streamlit can hash them correctly.
+    No widgets may be called inside a ``@st.cache_resource`` function.
 
     Args:
-        cfg: UIConfig values (pure data).
+        transport: ``"http"`` or ``"stdio"``.
+        http_url: MCP endpoint URL (HTTP transport).
+        bearer_token: Bearer token for auth, or empty string.
+        stdio_command: Python executable for stdio transport.
+        trace_file: Trace file path injected into stdio server env.
 
     Returns:
         Connected MCPClientSync instance.
     """
-    args = _safe_parse_json_list(cfg.stdio_args_json)
-    env = _safe_parse_json_dict(cfg.stdio_env_json)
-
-    if cfg.transport == "http":
-        server_cfg = MCPServerConfig(
-            transport="http",
-            http_url=cfg.http_url,
-        )
+    if transport == "http":
+        headers = {"Authorization": f"Bearer {bearer_token}"} if bearer_token else None
+        cfg = MCPServerConfig(transport="http", http_url=http_url, http_headers=headers)
     else:
-        server_cfg = MCPServerConfig(
+        env = os.environ.copy()
+        env["BAMBOO_TRACE"] = "1"
+        env["BAMBOO_TRACE_FILE"] = trace_file
+        env["BAMBOO_QUIET"] = "1"
+        cfg = MCPServerConfig(
             transport="stdio",
-            stdio_command=cfg.stdio_command or sys.executable,
-            stdio_args=args,
+            stdio_command=stdio_command,
+            stdio_args=["-m", "bamboo.server"],
             stdio_env=env,
         )
+    return MCPClientSync(cfg)
 
-    return MCPClientSync(server_cfg)
+
+# ---------------------------------------------------------------------------
+# Session state helpers
+# ---------------------------------------------------------------------------
+
+def _init_session() -> None:
+    """Initialise all required session state keys on first run."""
+    defaults: dict[str, Any] = {
+        "messages": [],
+        "fast_path": True,
+        "tool_names": [],
+        "display_name": "AskPanDA",
+        "llm_info": "",
+        "server_ok": False,
+        "last_spans": [],
+        "last_evidence": None,
+        "last_raw": None,
+        "trace_file": os.path.join(
+            tempfile.gettempdir(), f"bamboo_streamlit_{os.getpid()}.jsonl"
+        ),
+        "pending_question": None,
+    }
+    for key, val in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
 
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-def _sidebar_config() -> UIConfig:
-    """Render sidebar widgets and return selected config.
+def _connect(mcp: MCPClientSync, plugin_id: str) -> None:
+    """Fetch tool list, LLM info and display name from the server.
+
+    Args:
+        mcp: Connected MCP client.
+        plugin_id: Active plugin namespace (e.g. ``"atlas"``).
+    """
+    try:
+        tools = _tool_names(mcp.list_tools())
+        st.session_state["tool_names"] = tools
+        st.session_state["server_ok"] = True
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        st.session_state["server_ok"] = False
+        st.session_state["tool_names"] = []
+        raise exc
+
+    # LLM info via bamboo_health
+    try:
+        health_raw = mcp.call_tool("bamboo_health", {})
+        health_text = _extract_text(health_raw)
+        for line in health_text.splitlines():
+            if "llm_info:" in line:
+                st.session_state["llm_info"] = line.split(":", 1)[1].strip()
+                break
+    except Exception:  # pylint: disable=broad-exception-caught
+        st.session_state["llm_info"] = ""
+
+    # Display name and banner from ui_manifest
+    manifest_tool = f"{plugin_id}.ui_manifest"
+    if manifest_tool in tools:
+        try:
+            raw = mcp.call_tool(manifest_tool, {})
+            manifest = json.loads(_extract_text(raw) or "{}")
+            if isinstance(manifest, dict):
+                st.session_state["display_name"] = str(
+                    manifest.get("display_name") or f"AskPanDA – {plugin_id.upper()}"
+                )
+        except Exception:  # pylint: disable=broad-exception-caught
+            st.session_state["display_name"] = f"AskPanDA – {plugin_id.upper()}"
+    else:
+        st.session_state["display_name"] = f"AskPanDA – {plugin_id.upper()}"
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+def _render_sidebar() -> tuple[str, str, str, str, str]:
+    """Render sidebar controls and return connection parameters.
 
     Returns:
-        UIConfig with values from widgets.
+        Tuple of ``(transport, http_url, bearer_token, plugin_id, stdio_command)``.
     """
-    st.sidebar.header("AskPanDA MCP Connection")
+    st.sidebar.title("AskPanDA")
 
-    transport = st.sidebar.selectbox("Transport", ["http", "stdio"], index=0)
-
-    stdio_command = sys.executable
-    stdio_args_json = st.sidebar.text_area(
-        "STDIO args (JSON list)",
-        value=json.dumps(["-m", "bamboo.server"]),
-        height=70,
-        help='Example: ["-m", "bamboo.server"]',
+    # --- Connection ---
+    st.sidebar.header("Connection")
+    transport = st.sidebar.selectbox(
+        "Transport", ["http", "stdio"], index=0,
+        help="HTTP: connect to a running server. stdio: spawn a local server.",
     )
 
-    stdio_env_json = st.sidebar.text_area(
-        "STDIO env (JSON object, optional)",
-        value="",
-        height=70,
-        help='Example: {"PYTHONPATH": "/path/to/repo"}',
+    http_url = st.sidebar.text_input(
+        "Server URL",
+        value=os.getenv("MCP_URL", "http://localhost:8000/mcp"),
+        disabled=(transport != "http"),
+        help="MCP endpoint URL, e.g. http://hostname:8000/mcp",
     )
 
-    http_url = "http://localhost:8000/mcp"
-    if transport == "http":
-        http_url = st.sidebar.text_input("HTTP MCP URL", value=http_url)
+    bearer_token = st.sidebar.text_input(
+        "Bearer token (optional)",
+        value=os.getenv("MCP_BEARER_TOKEN", ""),
+        type="password",
+        disabled=(transport != "http"),
+        help="Leave empty if the server has no auth configured.",
+    )
 
-    if st.sidebar.button("Reset MCP connection"):
-        # Clear cached resources and rerun.
-        st.cache_resource.clear()
-        st.rerun()
+    plugin_id = st.sidebar.selectbox(
+        "Experiment / plugin",
+        ["atlas", "epic"],
+        index=0 if _DEFAULT_PLUGIN == "atlas" else 1,
+        help="Selects the ui_manifest tool and display name.",
+    )
 
-    if st.sidebar.button("Clear chat history"):
-        st.session_state["messages"] = []
-        st.session_state.pop("_pending_assistant", None)
-        st.rerun()
+    stdio_command = sys.executable  # not exposed to users; used internally
 
-    # End-to-end test / escape hatch: bypass tool routing and send the full chat
-    # (including history) directly to the default LLM profile.
-    if "bypass_routing" not in st.session_state:
-        st.session_state["bypass_routing"] = True
+    # --- Server status ---
+    st.sidebar.header("Status")
+    if st.session_state.get("server_ok"):
+        st.sidebar.success("Connected")
+        llm_info = st.session_state.get("llm_info", "")
+        if llm_info:
+            st.sidebar.caption(f"🤖 {llm_info}")
+        n_tools = len(st.session_state.get("tool_names", []))
+        st.sidebar.caption(f"{n_tools} tools registered")
+    else:
+        st.sidebar.warning("Not connected")
+
+    # --- Settings ---
+    st.sidebar.header("Settings")
     st.sidebar.toggle(
-        "Bypass tool routing (send directly to default LLM)",
-        key="bypass_routing",
-        help="Useful for sanity-checking LLM configuration and as a future escape hatch.",
+        "Fast-path routing",
+        key="fast_path",
+        help=(
+            "ON: deterministic routing for task/job/pilot questions (faster). "
+            "OFF: all questions go through the LLM planner."
+        ),
     )
 
-    return UIConfig(
-        transport=transport,
-        stdio_command=stdio_command,
-        stdio_args_json=stdio_args_json,
-        stdio_env_json=stdio_env_json,
-        http_url=http_url,
+    n_turns = len(st.session_state.get("messages", [])) // 2
+    st.sidebar.caption(
+        f"Context: {n_turns} / {_MAX_HISTORY_TURNS} turns in memory"
     )
 
+    # --- Actions ---
+    st.sidebar.header("Actions")
+    if st.sidebar.button("🔄  Reconnect", use_container_width=True):
+        st.cache_resource.clear()
+        for key in ("server_ok", "tool_names", "display_name", "llm_info",
+                    "last_spans", "last_evidence", "last_raw"):
+            st.session_state.pop(key, None)
+        st.rerun()
 
-def _render_connection_status(mcp: MCPClientSync) -> tuple[list[str], list[str]]:
-    """Fetch and display tools/prompts.
+    if st.sidebar.button("🗑  Clear chat", use_container_width=True):
+        st.session_state["messages"] = []
+        st.session_state["last_spans"] = []
+        st.session_state["last_evidence"] = None
+        st.session_state["last_raw"] = None
+        st.rerun()
+
+    with st.sidebar.expander("Tools registered on server"):
+        tools = st.session_state.get("tool_names", [])
+        if tools:
+            st.write("\n".join(f"- `{t}`" for t in tools))
+        else:
+            st.caption("Not connected yet.")
+
+    return transport, http_url, bearer_token, str(plugin_id), stdio_command
+
+
+# ---------------------------------------------------------------------------
+# Response detail expanders
+# ---------------------------------------------------------------------------
+
+def _render_tracing_expander(
+    spans: list[dict[str, Any]],
+    transport: str,
+) -> None:
+    """Render tracing span data in a Streamlit expander.
+
+    Args:
+        spans: Trace spans collected for the last request.
+        transport: ``"http"`` or ``"stdio"``.
+    """
+    with st.expander("⏱  Tracing", expanded=False):
+        if not spans:
+            if transport == "http":
+                st.caption(
+                    "Trace spans are not available for HTTP transport — the server "
+                    "writes them to its own trace file. To inspect them, run on the server:\n\n"
+                    "```bash\ntail -f $BAMBOO_TRACE_FILE | grep bamboo_trace | jq .\n```"
+                )
+            else:
+                st.caption("No spans collected for this request.")
+            return
+
+        rows: list[dict[str, Any]] = []
+        total_ms = 0.0
+        for span in spans:
+            event = str(span.get("event", ""))
+            tool = str(span.get("tool", ""))
+            duration_ms = float(span.get("duration_ms", 0.0))
+            if event == "tool_call":
+                total_ms = duration_ms
+            # Build a short detail string
+            detail_parts: list[str] = []
+            if event == "llm_call":
+                provider = span.get("provider", "")
+                model = span.get("model", "")
+                inp = span.get("input_tokens")
+                out = span.get("output_tokens")
+                detail_parts.append(f"{provider}/{model}")
+                if inp is not None and out is not None:
+                    detail_parts.append(f"tokens={inp}→{out}")
+            elif event == "guard":
+                allowed = span.get("allowed")
+                reason = span.get("reason", "")
+                detail_parts.append(f"allowed={allowed} reason={reason}")
+            elif event == "retrieval":
+                backend = span.get("backend", "")
+                hits = span.get("hits")
+                if backend:
+                    detail_parts.append(f"backend={backend}")
+                if hits is not None:
+                    detail_parts.append(f"hits={hits}")
+            elif event == "route":
+                route = span.get("route", "")
+                if route:
+                    detail_parts.append(f"route={route}")
+            rows.append({
+                "event": event,
+                "tool": tool,
+                "ms": f"{duration_ms:.0f}",
+                "detail": "  ".join(detail_parts),
+            })
+
+        rows.append({"event": "total", "tool": "", "ms": f"{total_ms:.0f}", "detail": "wall time"})
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
+def _render_costs_expander(spans: list[dict[str, Any]]) -> None:
+    """Render estimated LLM cost in a Streamlit expander.
+
+    Args:
+        spans: Trace spans collected for the last request.
+    """
+    with st.expander("💰  Estimated cost", expanded=False):
+        if not spans:
+            st.caption("No trace data — cost estimation requires tracing.")
+            return
+
+        est = _estimate_cost(spans)
+        calls = est["calls"]
+        if not calls:
+            st.caption("No LLM calls found in spans (tracing may be disabled on the server).")
+            return
+
+        st.dataframe(
+            [
+                {
+                    "model": c["model"],
+                    "input tok": c["input_tokens"],
+                    "output tok": c["output_tokens"],
+                    "duration ms": f"{c['duration_ms']:.0f}",
+                    "cost USD": f"${c['cost_usd']:.6f}",
+                }
+                for c in calls
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            f"**Total:** {est['total_input']:,} in + {est['total_output']:,} out = "
+            f"{est['total_tokens']:,} tokens  |  **${est['total_cost_usd']:.6f}**"
+        )
+        if est["unknown_models"]:
+            st.warning(
+                f"Unknown model(s): {', '.join(est['unknown_models'])}. "
+                f"Rates defaulted to ${_DEFAULT_COST[0]:.2f}/${_DEFAULT_COST[1]:.2f} per Mtok."
+            )
+
+
+def _render_evidence_expander(evidence: Any) -> None:
+    """Render the compact evidence dict in a Streamlit expander.
+
+    Args:
+        evidence: Evidence dict from ``bamboo_last_evidence`` with ``mode='evidence'``.
+    """
+    with st.expander("🔬  Evidence (inspect)", expanded=False):
+        if evidence is None:
+            st.caption("No evidence stored — ask about a specific task or job first.")
+            return
+        st.json(evidence)
+
+
+def _render_raw_expander(raw: Any) -> None:
+    """Render the raw BigPanDA API response in a Streamlit expander.
+
+    Args:
+        raw: Raw payload from ``bamboo_last_evidence`` with ``mode='raw'``.
+    """
+    with st.expander("📄  Raw JSON", expanded=False):
+        if raw is None:
+            st.caption("No raw payload stored — ask about a specific task or job first.")
+            return
+        st.json(raw)
+
+
+def _fetch_evidence(mcp: MCPClientSync) -> tuple[Any, Any]:
+    """Fetch compact evidence and raw payload from the server.
+
+    Calls ``bamboo_last_evidence`` twice — once for the compact evidence dict
+    and once for the verbatim BigPanDA API response.
 
     Args:
         mcp: Connected MCP client.
 
     Returns:
-        (tool_names, prompt_names)
+        Tuple of ``(evidence_dict_or_None, raw_payload_or_None)``.
     """
-    with st.spinner("Fetching MCP capabilities..."):
-        tools_result = mcp.list_tools()
-        prompts_result = mcp.list_prompts()
+    evidence = None
+    raw = None
+    try:
+        ev_raw = mcp.call_tool("bamboo_last_evidence", {"mode": "evidence"})
+        ev_text = _extract_text(ev_raw)
+        if ev_text:
+            parsed = json.loads(ev_text)
+            inner = parsed.get("evidence", parsed)
+            if inner and not (isinstance(inner, dict) and "error" in inner):
+                evidence = inner
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
 
-    tool_names = _tool_names(tools_result)
-    prompt_names = _prompt_names(prompts_result)
+    try:
+        raw_result = mcp.call_tool("bamboo_last_evidence", {"mode": "raw"})
+        raw_text = _extract_text(raw_result)
+        if raw_text:
+            parsed_raw = json.loads(raw_text)
+            inner_raw = parsed_raw.get("evidence", parsed_raw)
+            if inner_raw and not (isinstance(inner_raw, dict) and "error" in inner_raw):
+                raw = inner_raw
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.caption("Tools")
-        st.write(tool_names if tool_names else "No tools returned.")
-    with c2:
-        st.caption("Prompts")
-        st.write(prompt_names if prompt_names else "No prompts returned.")
-
-    return tool_names, prompt_names
+    return evidence, raw
 
 
-def _manual_tool_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
-    """Render a manual tool invocation panel.
+# ---------------------------------------------------------------------------
+# Main chat panel
+# ---------------------------------------------------------------------------
+
+def _render_chat(mcp: MCPClientSync, transport: str) -> None:
+    """Render the main chat panel.
+
+    Handles the two-rerun pattern required by Streamlit:
+    - Rerun 1: append user message, set ``pending_question``, rerun.
+    - Rerun 2: generate assistant response, clear ``pending_question``, rerun.
 
     Args:
-        mcp: MCP client.
-        tool_names: Available tool names.
+        mcp: Connected MCP client.
+        transport: ``"http"`` or ``"stdio"`` — affects tracing availability.
     """
-    st.subheader("Manual tool call")
+    messages: list[dict[str, str]] = st.session_state["messages"]
 
-    if not tool_names:
-        st.info("No tools available to call.")
-        return
+    # Generate assistant response for a pending question
+    if st.session_state.get("pending_question"):
+        question: str = st.session_state["pending_question"]
+        st.session_state["pending_question"] = None
 
-    selected = st.selectbox("Tool", list(tool_names))
-    args_text = st.text_area("Arguments (JSON object)", value="{}", height=120)
-
-    if st.button("Call tool"):
-        try:
-            args = json.loads(args_text) if args_text.strip() else {}
-            if not isinstance(args, dict):
-                raise ValueError("Arguments must be a JSON object.")
-        except Exception as e:
-            st.error(f"Invalid JSON arguments: {e}")
-            return
-
-        try:
-            result = mcp.call_tool(selected, args)
-            st.code(_extract_text_from_content(result), language="text")
-        except Exception as e:
-            st.error(f"Tool call failed: {e}")
-
-
-def _chat_panel(mcp: MCPClientSync, tool_names: Sequence[str]) -> None:
-    """Render the main chat UI.
-
-    This implementation keeps the chat input fixed at the bottom by:
-    - recording the submitted user message and triggering a rerun
-    - generating the assistant response on the *next* run before rendering history
-
-    Conversation history is capped at ``_MAX_HISTORY_TURNS`` user+assistant
-    pairs so the LLM context window stays manageable.
-
-    Args:
-        mcp: Connected MCP client (sync wrapper).
-        tool_names: List of available tool names.
-    """
-    st.subheader("Chat")
-
-    if "messages" not in st.session_state:
-        st.session_state["messages"] = []  # type: ignore[assignment]
-
-    answer_tool = _detect_answer_tool(tool_names)
-
-    # If we have a pending assistant response, generate it first so it appears
-    # in the history above the input box (ChatGPT-style).
-    if st.session_state.get("_pending_assistant", False):
-        st.session_state["_pending_assistant"] = False
+        trace_file: str = st.session_state["trace_file"]
+        pre_pos = _trace_file_size(trace_file) if transport == "stdio" else 0
 
         with st.spinner("Thinking…"):
             try:
-                last_user = next(
-                    (m["content"] for m in reversed(st.session_state["messages"]) if m.get("role") == "user"),
-                    "",
-                )
                 result = mcp.call_tool(
-                    answer_tool,
+                    _ANSWER_TOOL,
                     {
-                        "question": last_user,
-                        "messages": list(st.session_state["messages"]),
-                        "bypass_routing": st.session_state.get("bypass_routing", False),
+                        "question": question,
+                        "messages": list(messages),
+                        "bypass_fast_path": not st.session_state.get("fast_path", True),
                     },
                 )
+                answer = _extract_text(result) or "*(No text output.)*"
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                answer = f"⚠️ Error: {exc}"
 
-                answer = _extract_text_from_content(result)
-                if not answer.strip():
-                    answer = "(Tool returned no text content.)"
-            except Exception as e:  # noqa: BLE001
-                answer = f"Tool call failed: {e}"
+        # Collect spans (stdio only)
+        spans: list[dict[str, Any]] = []
+        if transport == "stdio":
+            spans = _read_spans(trace_file, pre_pos)
+        st.session_state["last_spans"] = spans
 
-        st.session_state["messages"].append({"role": "assistant", "content": answer})  # type: ignore[index]
-        # Cap history after recording the assistant reply.
-        st.session_state["messages"] = _cap_messages(st.session_state["messages"])
-        # Rerun once more so the assistant message is rendered as part of history
-        # and the input stays at the bottom.
+        # Fetch evidence from server store
+        evidence, raw = _fetch_evidence(mcp)
+        st.session_state["last_evidence"] = evidence
+        st.session_state["last_raw"] = raw
+
+        # Append assistant reply and cap history
+        messages.append({"role": "assistant", "content": answer})
+        st.session_state["messages"] = _cap_messages(messages)
         st.rerun()
 
-    # Show turn count indicator.
-    n_pairs = len(st.session_state["messages"]) // 2
-    if n_pairs > 0:
-        st.caption(f"Context: {n_pairs}/{_MAX_HISTORY_TURNS} turn{'s' if n_pairs != 1 else ''} in memory")
-
-    # Show chat history
+    # Render chat history
     for msg in st.session_state["messages"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Chat input should be the last UI element so it stays at the bottom.
-    question = st.chat_input("Ask AskPanDA…")
+    # Detail expanders below the last assistant reply
+    if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "assistant":
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            _render_tracing_expander(st.session_state["last_spans"], transport)
+        with col2:
+            _render_costs_expander(st.session_state["last_spans"])
+        with col3:
+            _render_evidence_expander(st.session_state["last_evidence"])
+        with col4:
+            _render_raw_expander(st.session_state["last_raw"])
 
+    # Chat input — must be the last widget
+    question = st.chat_input("Ask AskPanDA…")
     if question:
-        st.session_state["messages"].append({"role": "user", "content": question})  # type: ignore[index]
-        st.session_state["_pending_assistant"] = True
+        st.session_state["messages"].append({"role": "user", "content": question})
+        st.session_state["pending_question"] = question
         st.rerun()
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main() -> None:
-    """Prepare Main Streamlit entrypoint."""
-    st.set_page_config(page_title="AskPanDA (MCP)", layout="wide")
+    """Streamlit app entry point."""
+    st.set_page_config(
+        page_title="AskPanDA",
+        page_icon="🐼",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
 
-    # Apply CSS styles (must be done after set_page_config)
-    st.markdown(_CHAT_CSS, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <style>
+        /* Base font size — increase from Streamlit default (14px) */
+        html, body, [class*="css"] {
+            font-size: 16px !important;
+        }
+        /* Chat messages */
+        [data-testid="stChatMessage"] {
+            font-size: 16px !important;
+        }
+        /* Sidebar */
+        [data-testid="stSidebar"] {
+            font-size: 15px !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    # Style tweaks: remove the red focus border on the chat input.
-    st.title("AskPanDA (MCP-first)")
+    _init_session()
 
-    cfg = _sidebar_config()
+    transport, http_url, bearer_token, plugin_id, stdio_command = _render_sidebar()
 
-    # Build (cached) MCP client – widgets are already done above
+    # Build (or retrieve cached) MCP client
     try:
-        mcp = _get_mcp_client(cfg)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        error_details = traceback.format_exc()
-        st.error(f"Failed to create MCP client: {e}")
-        st.error(f"Details:\n{error_details}")
+        mcp = _get_mcp_client(
+            transport=transport,
+            http_url=http_url,
+            bearer_token=bearer_token,
+            stdio_command=stdio_command,
+            trace_file=st.session_state["trace_file"],
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        st.error(f"Failed to create MCP client: {exc}")
+        st.code(traceback.format_exc())
         st.stop()
 
-    # Show tools/prompts
-    try:
-        tool_names, _ = _render_connection_status(mcp)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        st.error(f"Failed to list tools/prompts: {e}")
-        st.stop()
+    # Connect / refresh server metadata if not yet done
+    if not st.session_state.get("server_ok"):
+        with st.spinner("Connecting to server…"):
+            try:
+                _connect(mcp, plugin_id)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                st.error(f"Could not connect to MCP server: {exc}")
+                st.info(
+                    "Check that the server is running and the URL/token are correct, "
+                    "then click **Reconnect** in the sidebar."
+                )
+                st.stop()
 
-    # Tabs: Chat + Manual tool calls
-    tab_chat, tab_tools = st.tabs(["Chat", "Tools"])
-    with tab_chat:
-        _chat_panel(mcp, tool_names)
-    with tab_tools:
-        _manual_tool_panel(mcp, tool_names)
+    # Page header
+    display_name: str = st.session_state.get("display_name", "AskPanDA")
+    st.title(display_name)
+    llm_info = st.session_state.get("llm_info", "")
+    if llm_info:
+        st.caption(f"🤖 {llm_info}")
+
+    _render_chat(mcp, transport)
 
 
 if __name__ == "__main__":

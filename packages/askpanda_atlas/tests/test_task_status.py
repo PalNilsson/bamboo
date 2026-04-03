@@ -212,10 +212,13 @@ def test_task_status_url_uses_jobs_endpoint(
 
     asyncio.run(ts_mod.panda_task_status_tool.call({"task_id": 42}))
 
-    assert len(captured) == 1
+    # Dual-endpoint fetch: jobs endpoint first, task metadata endpoint second.
+    assert len(captured) == 2
     assert "/jobs/" in captured[0]
     assert "jeditaskid=42" in captured[0]
     assert "json" in captured[0]
+    assert "/task/42/" in captured[1]
+    assert "json" in captured[1]
 
 
 def test_task_status_result_is_json_serialisable(

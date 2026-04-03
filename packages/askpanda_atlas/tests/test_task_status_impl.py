@@ -561,9 +561,11 @@ class TestFetchAndAnalyse:
         with patch("askpanda_atlas._cache.cached_fetch_jsonish", _capture):
             fetch_and_analyse("https://bigpanda.cern.ch", 12345)
 
-        assert len(captured) == 1
+        # Dual-endpoint fetch: jobs endpoint first, task metadata endpoint second.
+        assert len(captured) == 2
         assert "/jobs/" in captured[0]
         assert "jeditaskid=12345" in captured[0]
+        assert "/task/12345/" in captured[1]
 
     def test_raises_on_non_json_response(self) -> None:
         """RuntimeError is raised when the API returns non-JSON (payload=None)."""
