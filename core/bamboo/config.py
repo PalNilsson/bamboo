@@ -63,7 +63,7 @@ class Config:  # pylint: disable=too-many-instance-attributes
     """
 
     SERVER_NAME: str = os.getenv("ASKPANDA_SERVER_NAME", "askpanda-mcp-server")
-    SERVER_VERSION: str = os.getenv("ASKPANDA_SERVER_VERSION", "0.1.0")
+    SERVER_VERSION: str = os.getenv("ASKPANDA_SERVER_VERSION", "1.0.0")
 
     # Toggle real integrations later
     ENABLE_REAL_PANDA: bool = os.getenv("ASKPANDA_ENABLE_REAL_PANDA", "0") == "1"
