@@ -623,6 +623,7 @@ class BambooTui(App):
                 Text(banner_text, no_wrap=True),
                 title=self.display_name,
                 subtitle=f"plugin={self.plugin_id}",
+                border_style="yellow",
                 padding=(0, 1),
                 expand=True,
             )
@@ -791,6 +792,7 @@ class BambooTui(App):
                 Text(banner_text, no_wrap=True),
                 title=self.display_name,
                 subtitle=f"plugin={self.plugin_id}",
+                border_style="yellow",
                 padding=(0, 1),
                 expand=True,
             )
