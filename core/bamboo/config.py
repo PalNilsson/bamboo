@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
 try:
     import tomllib  # type: ignore[import]
 except ImportError:  # Python < 3.11
@@ -15,7 +17,12 @@ except ImportError:  # Python < 3.11
         import tomli as tomllib  # type: ignore[no-redef]
     except ImportError:
         tomllib = None  # type: ignore[assignment]
-from pathlib import Path
+
+try:
+    from importlib.metadata import version as _pkg_version
+    _bamboo_version: str = _pkg_version("bamboo")
+except Exception:  # package not installed or metadata unavailable
+    _bamboo_version = "0.0.0.dev0"
 
 
 def load_askpanda_config() -> dict:
@@ -63,7 +70,7 @@ class Config:  # pylint: disable=too-many-instance-attributes
     """
 
     SERVER_NAME: str = os.getenv("ASKPANDA_SERVER_NAME", "askpanda-mcp-server")
-    SERVER_VERSION: str = os.getenv("ASKPANDA_SERVER_VERSION", "1.0.0")
+    SERVER_VERSION: str = os.getenv("ASKPANDA_SERVER_VERSION", _bamboo_version)
 
     # Toggle real integrations later
     ENABLE_REAL_PANDA: bool = os.getenv("ASKPANDA_ENABLE_REAL_PANDA", "0") == "1"
