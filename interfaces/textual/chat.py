@@ -620,10 +620,10 @@ class BambooTui(App):
         banner_text = "\n".join(FALLBACK_BANNER)
         self.banner_widget.update(
             Panel(
-                Text(banner_text, no_wrap=True),
+                Text(banner_text, style="#0b80c3", no_wrap=True),
                 title=self.display_name,
                 subtitle=f"plugin={self.plugin_id}",
-                border_style="yellow",
+                border_style="blue",
                 padding=(0, 1),
                 expand=True,
             )
@@ -789,10 +789,10 @@ class BambooTui(App):
         banner_text = "\n".join(self.banner_lines)
         self.banner_widget.update(
             Panel(
-                Text(banner_text, no_wrap=True),
+                Text(banner_text, style="#0b80c3", no_wrap=True),
                 title=self.display_name,
                 subtitle=f"plugin={self.plugin_id}",
-                border_style="yellow",
+                border_style="#1b90f3",
                 padding=(0, 1),
                 expand=True,
             )
