@@ -610,6 +610,12 @@ def build_evidence(task: PandaTaskData) -> dict[str, Any]:
             f"Use get_pandaid_list() or get_pandaid_list_by_status() to retrieve IDs."
         )
 
+    # Flat list of failed job PanDA IDs — easier for LLMs to find than
+    # extracting pandaid from each dict in failed_jobs_sample.
+    failed_pandaids: list[int] = [
+        j["pandaid"] for j in failed_sample if "pandaid" in j
+    ]
+
     return {
         "task_summary": task_summary,
         "total_jobs": total,
@@ -617,6 +623,7 @@ def build_evidence(task: PandaTaskData) -> dict[str, Any]:
         "jobs_by_site": jobs_by_site,
         "jobs_by_piloterrorcode": jobs_by_piloterrorcode,
         "errs_by_count": task.errs_by_count,
+        "failed_pandaids": failed_pandaids,
         "failed_jobs_sample": failed_sample,
         "finished_jobs_sample": finished_sample,
         "pandaid_list_note": pandaid_note,

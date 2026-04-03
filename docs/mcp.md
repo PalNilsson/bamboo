@@ -95,8 +95,14 @@ answer.  It receives:
 
 For content-free follow-ups ("Tell me more"), the user message uses
 **expansion framing** — the LLM is told to go deeper than the prior answer
-with a 200-300 word target, and `max_tokens` is capped at 600 to keep
-response time predictable.  For all other questions `max_tokens` is 2048.
+with a 200-300 word target, and `max_tokens` defaults to 600 to keep
+response time predictable.  For all other questions `max_tokens` defaults
+to 2048.  Both values are configurable:
+
+```bash
+export BAMBOO_SYNTHESIS_MAX_TOKENS=4096   # fresh questions (default 2048)
+export BAMBOO_FOLLOWUP_MAX_TOKENS=1024    # follow-up expansions (default 600)
+```
 
 The LLM's role here is purely presentational: it summarises and explains
 evidence but does not select tools, invent facts, or call further tools.
@@ -302,7 +308,8 @@ selected by `_pick_synthesis_prompt()` based on which tools ran:
 | other / mixed | Generic multi-tool prompt |
 
 When `original_question` is set (content-free follow-up), the user message
-uses expansion framing with a 200-300 word target and `max_tokens=600`.
+uses expansion framing with a 200-300 word target and `max_tokens` defaulting
+to 600 (configurable via `BAMBOO_FOLLOWUP_MAX_TOKENS`).
 
 ### bamboo_plan (LLM-backed planner)
 

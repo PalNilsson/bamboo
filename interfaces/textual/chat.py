@@ -430,6 +430,11 @@ class BambooTui(App):
         self._trace_file: str = os.path.join(
             tempfile.gettempdir(), f"bamboo_trace_{os.getpid()}.jsonl"
         )
+        # Question queue — allows the user to keep typing while a response is
+        # in progress.  Submitted questions are enqueued and drained one at a
+        # time by _question_worker so responses are always returned in order.
+        self._question_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._is_thinking: bool = False
 
         self.banner_widget: Optional[Static] = None
         self.transcript: Optional[RichLog] = None
@@ -485,6 +490,7 @@ class BambooTui(App):
 
         # IMPORTANT: no awaits here; let Textual finish initial render.
         self._mcp_task = asyncio.create_task(self._mcp_main(), name="bamboo.mcp_main")
+        asyncio.create_task(self._question_worker(), name="bamboo.question_worker")
         self.action_focus_input()
 
     async def on_exit(self) -> None:
@@ -506,7 +512,12 @@ class BambooTui(App):
     async def _mcp_main(self) -> None:
         """Own the MCP lifecycle in a single task."""
         try:
-            await asyncio.wait_for(self._mcp_connect(), timeout=5)
+            # Don't wrap _mcp_connect in wait_for — the MCPClientSync._run()
+            # has its own timeout (BAMBOO_MCP_CLIENT_TIMEOUT, default 120 s).
+            # Using asyncio.wait_for here cancels the underlying thread call,
+            # which raises CancelledError through _run() even when the server
+            # is starting correctly but slowly.
+            await self._mcp_connect()
             await asyncio.wait_for(self._refresh_tools(), timeout=20)
             self._detect_answer_tool()
 
@@ -657,6 +668,11 @@ class BambooTui(App):
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle Enter on the input field.
 
+        Questions are placed on ``_question_queue`` immediately so the input
+        widget stays responsive while a previous response is in progress.
+        The worker drains the queue and calls ``_handle_question`` one at a
+        time, preserving submission order.
+
         Args:
             event (Input.Submitted): Submitted input event.
         """
@@ -671,14 +687,49 @@ class BambooTui(App):
         # Append to command history, avoiding consecutive duplicates.
         if not self._command_history or self._command_history[-1] != text:
             self._command_history.append(text)
-        self._cmd_history_pos = -1  # Reset browsing position after submit
+        self._cmd_history_pos = -1
 
         if text.startswith("/"):
+            # Slash commands are lightweight — run them directly.
             await self._handle_command(text)
         else:
-            await self._handle_question(text)
+            # Enqueue the question; _question_worker will process it when ready.
+            await self._question_queue.put(text)
+            if self._is_thinking:
+                # Let the user know their question is queued.
+                n = self._question_queue.qsize()
+                self._write_system(
+                    f"Queued (position {n}) — will answer once the current response completes."
+                )
 
         self.action_focus_input()
+
+    async def _question_worker(self) -> None:
+        """Drain the question queue one item at a time.
+
+        Runs for the lifetime of the app.  Waits for a question, processes it
+        fully via ``_handle_question``, then moves to the next.  This ensures
+        responses are always returned in submission order and the input widget
+        is never blocked.
+
+        ``asyncio.CancelledError`` is re-raised so Textual can cancel this
+        task cleanly on shutdown without logging a spurious error.
+        """
+        try:
+            while True:
+                question = await self._question_queue.get()
+                self._is_thinking = True
+                try:
+                    await self._handle_question(question)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    self._write_error(f"Unexpected error: {exc}")
+                finally:
+                    self._is_thinking = False
+                    self._question_queue.task_done()
+        except asyncio.CancelledError:
+            pass  # Clean shutdown — exit silently.
 
     async def _refresh_tools(self) -> None:
         """Refresh the tool list from the MCP server."""
@@ -1434,8 +1485,9 @@ class BambooTui(App):
             self._write_system("Not connected yet.")
             return
         try:
-            res = await self._to_thread(
-                self.mcp.call_tool, "bamboo_last_evidence", {"mode": "raw"},
+            res = await asyncio.wait_for(
+                self._to_thread(self.mcp.call_tool, "bamboo_last_evidence", {"mode": "raw"}),
+                timeout=30,
             )
             text = _extract_text(res)
             if not text:
@@ -1470,8 +1522,9 @@ class BambooTui(App):
             self._write_system("Not connected yet.")
             return
         try:
-            res = await self._to_thread(
-                self.mcp.call_tool, "bamboo_last_evidence", {"mode": "evidence"},
+            res = await asyncio.wait_for(
+                self._to_thread(self.mcp.call_tool, "bamboo_last_evidence", {"mode": "evidence"}),
+                timeout=30,
             )
             text = _extract_text(res)
             if not text:
@@ -1580,11 +1633,6 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--transport", choices=["stdio", "http"], required=True)
     ap.add_argument("--http-url", default=os.getenv("MCP_URL", "http://localhost:8000/mcp"))
-    ap.add_argument(
-        "--token",
-        default=os.getenv("MCP_BEARER_TOKEN", ""),
-        help="Bearer token for HTTP server authentication (or set MCP_BEARER_TOKEN).",
-    )
     ap.add_argument("--plugin", default=DEFAULT_PLUGIN)
     ap.add_argument("--terminate-on-close", action="store_true", default=True)
 
@@ -1595,15 +1643,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.transport == "http":
-        http_headers: dict[str, str] | None = (
-            {"Authorization": f"Bearer {args.token}"} if args.token else None
-        )
-        cfg = MCPServerConfig(
-            transport="http",
-            http_url=args.http_url,
-            http_headers=http_headers,
-            terminate_on_close=args.terminate_on_close,
-        )
+        cfg = MCPServerConfig(transport="http", http_url=args.http_url, terminate_on_close=args.terminate_on_close)
     else:
         _trace_file = os.path.join(tempfile.gettempdir(), f"bamboo_trace_{os.getpid()}.jsonl")
         _stdio_env = os.environ.copy()

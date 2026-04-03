@@ -50,33 +50,154 @@ def _jobs_url(base_url: str, task_id: int) -> str:
     return f"{base_url.rstrip('/')}{_JOBS_PATH}?jeditaskid={task_id}&json"
 
 
-# ---------------------------------------------------------------------------
-# Core synchronous fetch — no bamboo dependency
-# ---------------------------------------------------------------------------
+def _task_url(base_url: str, task_id: int) -> str:
+    """Build the BigPanDA task endpoint URL for a given task ID.
+
+    Args:
+        base_url: BigPanDA base URL.
+        task_id: JEDI task identifier.
+
+    Returns:
+        Full URL string ready for an HTTP GET request.
+    """
+    return f"{base_url.rstrip('/')}/task/{task_id}/?json"
 
 
-def fetch_and_analyse(base_url: str, task_id: int) -> dict[str, Any]:
-    """Fetch task jobs from BigPanDA and return a compact evidence dict.
+def _trace(record: dict[str, Any]) -> None:
+    """Write a debug record to the bamboo trace file if configured.
 
-    Synchronous; call via ``asyncio.to_thread()`` from async contexts.
-    Imports from :mod:`askpanda_atlas` locally so the function remains
-    usable from fallback stubs that lack bamboo core.
+    Uses the same NDJSON format as bamboo.tracing so the record appears in
+    the TUI's /tracing output.  This is the only way to surface debug info
+    from plugin code when the server runs under BAMBOO_QUIET=1 (stdio TUI).
 
-    ``fetch_jsonish`` returns a 4-tuple
-    ``(status_code, content_type, body_text, parsed_json_or_none)``.
-    Non-2xx responses and non-JSON bodies are treated as errors.
+    Args:
+        record: Dict of fields to include in the trace line.
+    """
+    trace_file = os.environ.get("BAMBOO_TRACE_FILE", "")
+    if not trace_file or not os.environ.get("BAMBOO_TRACE"):
+        return
+    try:
+        record["bamboo_trace"] = True
+        import json as _json
+        with open(trace_file, "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(record, default=str) + "\n")
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+
+def _fetch_task_meta(base_url: str, task_id: int) -> dict[str, Any]:
+    """Fetch task-level metadata from the BigPanDA task endpoint.
+
+    Retrieves the ``/task/{id}/?json`` endpoint which returns task-level fields
+    including ``status``, ``superstatus``, ``taskname``, ``username``,
+    ``creationdate``, ``starttime``, and ``endtime``.  These are distinct from
+    the job-level fields returned by the jobs endpoint.
+
+    The task endpoint response can have status either nested under a ``"task"``
+    key or at the top level — both shapes are handled.
+
+    Failures are logged to the trace file and an empty dict is returned so the
+    caller can proceed with job-level data alone.
 
     Args:
         base_url: BigPanDA base URL (no trailing slash).
         task_id: JEDI task identifier to query.
 
     Returns:
-        Evidence dictionary produced by
-        :func:`~askpanda_atlas.panda_task_schema.build_evidence`, augmented
-        with ``"task_id"`` and ``"endpoint"`` keys.
+        Dict with task-level fields, or empty dict on failure.
+    """
+    url = _task_url(base_url, task_id)
+    logger.debug("panda_task_status: fetching task meta %s", url)
+
+    try:
+        try:
+            from askpanda_atlas._cache import cached_fetch_jsonish  # type: ignore[import]
+            fetch_fn = cached_fetch_jsonish
+        except ImportError:
+            from askpanda_atlas._fallback_http import fetch_jsonish  # type: ignore[import]
+            fetch_fn = fetch_jsonish  # type: ignore[assignment]
+
+        status, _ctype, _body, payload = fetch_fn(url)
+        if status < 200 or status >= 300 or payload is None:
+            logger.warning(
+                "panda_task_status: task meta HTTP %d for task %d", status, task_id
+            )
+            _trace({"event": "task_meta", "task_id": task_id,
+                    "error": f"HTTP {status}", "url": url})
+            return {}
+
+        # Status is nested under "task" key or at the top level.
+        task = payload.get("task", {}) if isinstance(payload.get("task"), dict) else {}
+        task_status = (task.get("status") if task else None) or payload.get("status")
+        task_superstatus = (
+            (task.get("superstatus") if task else None) or payload.get("superstatus")
+        )
+
+        _trace({
+            "event": "task_meta",
+            "task_id": task_id,
+            "task_status": task_status,
+            "task_superstatus": task_superstatus,
+            "payload_keys": list(payload.keys()),
+            "task_keys": list(task.keys()) if task else [],
+        })
+
+        def _tf(key: str) -> Any:
+            """Get field from task dict with fallback to top-level payload."""
+            return (task.get(key) if task else None) or payload.get(key)
+
+        return {
+            "task_status": task_status,
+            "task_superstatus": task_superstatus,
+            "taskname": _tf("taskname"),
+            "username": _tf("username"),
+            "creationdate": _tf("creationdate"),
+            "starttime": _tf("starttime"),
+            "endtime": _tf("endtime"),
+            "task_monitor_url": f"{base_url.rstrip('/')}/task/{task_id}/",
+            # dsinfo contains authoritative file/event counts (nfilesfinished,
+            # nfilesfailed, etc.) — more reliable than job-level aggregates.
+            "dsinfo": _tf("dsinfo"),
+            "pctfinished": _tf("pctfinished"),
+            "totev": _tf("totev"),
+            "totevproc": _tf("totevproc"),
+        }
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "panda_task_status: task meta failed for task %d: %s", task_id, exc
+        )
+        _trace({"event": "task_meta", "task_id": task_id, "error": repr(exc), "url": url})
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Core synchronous fetch — no bamboo dependency
+# ---------------------------------------------------------------------------
+
+
+def fetch_and_analyse(base_url: str, task_id: int) -> dict[str, Any]:
+    """Fetch task jobs and task-level metadata from BigPanDA.
+
+    Makes two HTTP requests:
+
+    1. ``GET /jobs/?jeditaskid={id}&json`` — full job list for per-status /
+       per-site / per-error-code counts via
+       :func:`~askpanda_atlas.panda_task_schema.build_evidence`.
+    2. ``GET /task/{id}/?json`` — task-level metadata including the definitive
+       ``status`` and ``superstatus`` fields (e.g. ``"finished"``) regardless
+       of individual job failures.  Best-effort: failure still returns job data.
+
+    Synchronous; call via ``asyncio.to_thread()`` from async contexts.
+
+    Args:
+        base_url: BigPanDA base URL (no trailing slash).
+        task_id: JEDI task identifier to query.
+
+    Returns:
+        Evidence dictionary with both task-level and job-level fields.
 
     Raises:
-        RuntimeError: If the HTTP response is non-2xx or not a JSON dict.
+        RuntimeError: If the jobs HTTP response is non-2xx or not a JSON dict.
     """
     from askpanda_atlas._cache import cached_fetch_jsonish  # type: ignore[import]
     from askpanda_atlas.panda_task_schema import (  # type: ignore[import]
@@ -85,7 +206,7 @@ def fetch_and_analyse(base_url: str, task_id: int) -> dict[str, Any]:
     )
 
     url = _jobs_url(base_url, task_id)
-    logger.debug("panda_task_status: fetching %s", url)
+    logger.debug("panda_task_status: fetching jobs %s", url)
 
     status, ctype, body, payload = cached_fetch_jsonish(url)
 
@@ -103,16 +224,20 @@ def fetch_and_analyse(base_url: str, task_id: int) -> dict[str, Any]:
     evidence = build_evidence(task)
     evidence["task_id"] = task_id
     evidence["endpoint"] = url
-    # Store the verbatim BigPanDA response alongside the evidence so the
-    # bamboo_last_evidence tool can serve it via /json without re-fetching.
-    # raw_payload is intentionally NOT sent to the LLM — it is stripped by
-    # BambooLastEvidenceTool.call() when mode='evidence'.
+
+    # Fetch task-level status (best-effort — failures return empty dict).
+    task_meta = _fetch_task_meta(base_url, task_id)
+    if task_meta:
+        evidence.update(task_meta)
+
+    # raw_payload is NOT sent to the LLM — stripped by BambooLastEvidenceTool.
     evidence["raw_payload"] = payload
 
     logger.debug(
-        "panda_task_status: task_id=%d total_jobs=%d",
+        "panda_task_status: task_id=%d total_jobs=%d task_status=%s",
         task_id,
         evidence.get("total_jobs", 0),
+        evidence.get("task_status", "unknown"),
     )
     return evidence
 

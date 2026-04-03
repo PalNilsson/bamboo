@@ -300,23 +300,26 @@ class MCPClientSync:
         """
         # run_coroutine_threadsafe expects a coroutine; if a Future is passed
         # (unlikely in our usage), forward it as-is; otherwise use it directly.
+        # Timeout for waiting on the result. Defaults to 120 s — large task
+        # status fetches from BigPanDA can take 60–90 s for tasks with many
+        # thousands of jobs. Override with BAMBOO_MCP_CLIENT_TIMEOUT (seconds).
+        _timeout = int(os.environ.get("BAMBOO_MCP_CLIENT_TIMEOUT", "120"))
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]
         try:
-            # Wait up to 30 seconds for the result
-            return fut.result(timeout=30)
+            return fut.result(timeout=_timeout)
         except (asyncio.CancelledError, concurrent.futures.CancelledError) as e:
             raise RuntimeError(
-                f"MCP server is not running or failed to connect.\n"
-                f"Please start the MCP server before using Streamlit:\n"
+                f"MCP server connection was cancelled.\n"
+                f"This can happen during startup if the server subprocess exits immediately.\n"
+                f"Check that the server starts correctly:\n"
                 f"  python -m bamboo.server\n"
                 f"Original error: {type(e).__name__}"
             ) from e
         except concurrent.futures.TimeoutError as e:
             raise RuntimeError(
-                "MCP server connection timed out after 30 seconds.\n"
+                f"MCP server call timed out after {_timeout} seconds.\n"
                 "Is the MCP server running and responding?\n"
-                "Try starting it:\n"
-                "  python -m bamboo.server"
+                "Try increasing BAMBOO_MCP_CLIENT_TIMEOUT if fetching large tasks."
             ) from e
         except ConnectionRefusedError as e:
             raise RuntimeError(

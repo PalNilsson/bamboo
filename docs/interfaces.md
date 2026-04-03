@@ -8,26 +8,72 @@ are handled server-side by the Bamboo MCP server.
 
 # 1. Streamlit Web UI
 
-The Streamlit interface provides a browser-based chat experience.
+The Streamlit interface provides a browser-based chat experience suitable for
+demos, collaborative workflows, and shared deployments.
 
-## Run (stdio)
-
-```bash
-streamlit run interfaces/streamlit/chat.py --transport stdio
-```
-
-## Run (HTTP)
+## Install
 
 ```bash
-streamlit run interfaces/streamlit/chat.py --transport http --http-url http://localhost:8000/mcp
+pip install -r requirements-ui.txt
+pip install -e .   # required so `interfaces` is importable
 ```
 
-### Characteristics
+## Run
 
-- Browser-based UI
-- Good for demos and collaborative workflows
-- Easy to expose over HTTP
-- Stable and robust for normal use
+```bash
+streamlit run interfaces/streamlit/chat.py
+```
+
+Streamlit opens a browser tab at `http://localhost:8501`.
+
+## Sidebar controls
+
+| Control | Description |
+|---|---|
+| **Transport** | `http` — connect to a running uvicorn server. `stdio` — Streamlit spawns its own server subprocess. |
+| **Server URL** | MCP endpoint, e.g. `http://hostname:8000/mcp`. Reads `MCP_URL` env var as default. |
+| **Bearer token** | Optional auth token. Reads `MCP_BEARER_TOKEN` env var as default. Sent as `Authorization: Bearer <token>`. |
+| **Experiment / plugin** | Selects `atlas` or `epic`. Loads display name from `<plugin>.ui_manifest`. |
+| **Fast-path routing** | ON (default) — deterministic routing for task/job/pilot questions. OFF — all questions go through the LLM planner. |
+| **Reconnect** | Clears the cached MCP connection and reconnects. |
+| **Clear chat** | Clears conversation history. |
+| **Tools registered on server** | Expandable list of all tools on the connected server. |
+
+## Response detail panels
+
+After each assistant response, four expandable panels appear below the answer:
+
+| Panel | Contents |
+|---|---|
+| **⏱ Tracing** | Span table with event type, tool name, duration, and detail (stdio only — see note below). |
+| **💰 Estimated cost** | Per-call LLM token counts and USD cost estimate (stdio only). |
+| **🔬 Evidence (inspect)** | Compact evidence dict from `bamboo_last_evidence` — task/job metadata, job counts, site breakdown. Populated only for task/job queries. |
+| **📄 Raw JSON** | Verbatim BigPanDA API response from `bamboo_last_evidence`. Populated only for task/job queries. |
+
+> **Tracing in HTTP mode:** when connecting to a remote uvicorn server, the
+> server writes trace spans to its own file — the Streamlit client cannot read
+> them remotely. The Tracing and Cost panels will explain this and show the
+> `tail` command to run on the server. Switch to **stdio transport** to get
+> full tracing locally.
+
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `MCP_URL` | Default server URL (overridden by the Server URL field) |
+| `MCP_BEARER_TOKEN` | Default bearer token (overridden by the Bearer token field) |
+| `BAMBOO_HISTORY_TURNS` | Max conversation turns in context (default: 10) |
+| `BAMBOO_MCP_CLIENT_TIMEOUT` | Timeout in seconds for MCP tool calls (default: 120). Raise for large task fetches. |
+
+## Connecting to a shared server (testbed)
+
+```bash
+export MCP_URL="http://your-server:8000/mcp"
+export MCP_BEARER_TOKEN="your-token"
+streamlit run interfaces/streamlit/chat.py
+```
+
+See [`docs/http-server.md`](http-server.md) for how to run the shared server.
 
 ---
 
@@ -49,8 +95,14 @@ python interfaces/textual/chat.py --transport stdio --no-inline
 ## Run (HTTP)
 
 ```bash
-python interfaces/textual/chat.py --transport http --http-url http://localhost:8000/mcp --no-inline
+python interfaces/textual/chat.py --transport http \
+  --http-url http://localhost:8000/mcp \
+  --token your-bearer-token \
+  --no-inline
 ```
+
+The `--token` flag sends `Authorization: Bearer <token>` on every request.
+Alternatively set `MCP_BEARER_TOKEN` in the environment.
 
 ---
 
@@ -110,11 +162,16 @@ export BAMBOO_TUI_INLINE_HEIGHT=60
 | `/help` | Show all commands |
 | `/tools` | List tools registered on the server |
 | `/task <id>` | Shorthand for "summarise task \<id\>" |
-| `/json` | Show raw BigPanDA JSON for the last task query |
+| `/job <id>` | Shorthand for "analyse failure of job \<id\>" |
+| `/json` | Show raw BigPanDA JSON for the last task/job query |
+| `/inspect` | Show compact evidence dict (job counts, sites, errors) |
 | `/tracing` | Show timing and trace spans for the last request |
+| `/costs` | Show estimated LLM token cost for the last request |
 | `/history` | Show turns currently held in context memory |
+| `/plugin <id>` | Switch active experiment plugin (e.g. `/plugin epic`) |
+| `/fastpath on\|off` | Toggle deterministic fast-path routing (off → use LLM planner) |
 | `/debug on\|off` | Toggle verbose tool call output |
-| `/clear` | Clear transcript **and reset context memory** |
+| `/clear` | Clear transcript, context memory, and HTTP cache |
 | `/exit` | Quit |
 
 ---
@@ -174,6 +231,16 @@ Responsibilities:
 - Manage connection lifecycle (lazy connect for TUI stability)
 - Inherit environment variables (LLM configuration, plugin selection)
 - Isolate subprocess output to avoid terminal corruption
+
+### Timeout configuration
+
+The synchronous `MCPClientSync._run()` wrapper has a default timeout of
+**120 seconds** — large task status fetches from BigPanDA can take 60–90 s
+for tasks with thousands of jobs.  Override with:
+
+```bash
+export BAMBOO_MCP_CLIENT_TIMEOUT=180   # seconds
+```
 
 ---
 

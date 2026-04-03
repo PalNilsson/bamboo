@@ -4,21 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Bamboo** is a lightweight MCP-based runtime with a plugin architecture for AI-assisted scientific tools, targeting ATLAS/PanDA and ePIC/EIC workflows. LLMs are used for summarisation and explanation, not as sources of truth. Structured evidence is always fetched from BigPanDA, cached, and passed to the LLM; the raw API payload is kept available for inspection.
+**Bamboo** is a lightweight MCP-based runtime with a plugin architecture for AI-assisted scientific tools, primarily targeting ATLAS/PanDA workflows. LLMs are used for summarisation and explanation, not as sources of truth. Structured evidence is always fetched from BigPanDA, cached, and passed to the LLM; the raw API payload is kept available for inspection.
 
 ## Development Setup
 
 ```bash
-# Install core and plugins in editable mode
+# Install core and the ATLAS plugin in editable mode
 pip install -e ./core
 pip install -e ./packages/askpanda_atlas
-pip install -e ./packages/askpanda_epic
 
 # Install dev dependencies
 pip install -r requirements-dev.txt
-
-# Install RAG dependencies (ChromaDB + BM25)
-pip install -r requirements-rag.txt
 
 # Install Textual TUI dependencies
 pip install -r requirements-textual.txt
@@ -40,13 +36,11 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 # List available tools
 python -m bamboo tools list
 
-# Run all tests
-pytest tests/                              # core and architectural tests
-pytest packages/askpanda_atlas/tests/      # ATLAS plugin tests
-pytest packages/askpanda_epic/tests/       # ePIC plugin tests
+# Run all tests (405 passing; 10 pre-existing failures in test_bamboo_executor.py and test_narrow_waist.py)
+pytest tests/
 
 # Run a single test file
-pytest packages/askpanda_atlas/tests/test_task_status_impl.py
+pytest tests/test_task_status_impl.py
 
 # Linting
 flake8 .
@@ -134,7 +128,8 @@ Routing order in `_route()`:
 
 `execute_plan()` iterates the plan's tool calls, calls each tool, and synthesises a grounded LLM answer. Key behaviour:
 
-- After each successful tool call, the full evidence dict (including `raw_payload`) is stored in `_last_evidence_store[tool_name]`. `raw_payload` is **stripped before synthesis** so the LLM only sees the compact evidence fields.
+- After each successful tool call, the full evidence dict (including `raw_payload`) is stored in `_last_evidence_store[tool_name]`, with `pandaid_list` stripped (can be 50k entries — would cause `/inspect` timeouts). `raw_payload` and `pandaid_list` are both **stripped before LLM synthesis** so the LLM only sees the compact evidence fields. Both are accessible via `/json` and `/inspect` respectively.
+- The compact JSON budget for each evidence block is **12,000 characters** (`_compact_json` limit), truncated with `…` if exceeded and sorted alphabetically. Task-level fields (`task_status`, `task_superstatus`, etc.) are merged first in the evidence dict so they sort before job-level fields.
 - `BambooLastEvidenceTool` (`bamboo_last_evidence`) exposes the store via MCP. Accepts `mode="evidence"` (compact dict, `raw_payload` excluded) or `mode="raw"` (verbatim BigPanDA API response). Used by the TUI `/inspect` and `/json` commands.
 - `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_server_health` → PanDA liveness prompt; `panda_harvester_workers` + `panda_jobs_query` together → site-health prompt (two labelled evidence sources); `panda_harvester_workers` alone → pilot stats prompt; `panda_jobs_query` alone → jobs DB prompt; `panda_doc_*` → RAG documentation; other → generic.
 
@@ -155,25 +150,9 @@ Tools are registered via `pyproject.toml` entry points under `bamboo.tools`:
 "atlas.task_status" = "askpanda_atlas.task_status:panda_task_status_tool"
 "atlas.ui_manifest" = "askpanda_atlas.ui_manifest:atlas_ui_manifest_tool"
 "atlas.jobs_query"  = "askpanda_atlas.jobs_query:panda_jobs_query_tool"
-
-"epic.task_status"  = "askpanda_epic.task_status:panda_task_status_tool"
-"epic.log_analysis" = "askpanda_epic.log_analysis:panda_log_analysis_tool"
-"epic.doc_search"   = "askpanda_epic.doc_rag:epic_doc_search_tool"
-"epic.doc_bm25"     = "askpanda_epic.doc_bm25:epic_doc_bm25_tool"
-"epic.ui_manifest"  = "askpanda_epic.ui_manifest:epic_ui_manifest_tool"
 ```
 
 Each plugin is a separate installable package under `packages/`. Core discovers plugins at startup via `importlib.metadata.entry_points`. The `TOOLS` dict keys (e.g. `"panda_task_status"`) are internal identifiers; MCP-exposed names come from `get_definition()["name"]`.
-
-Plugin tests live alongside the plugin code, not in `bamboo/tests/`:
-
-```
-packages/askpanda_atlas/tests/    ← ATLAS plugin tests
-packages/askpanda_epic/tests/     ← ePIC plugin tests
-bamboo/tests/                     ← core and architectural tests only
-```
-
-Each plugin `tests/` directory has its own `conftest.py` (sets `sys.path` for local source runs) and the plugin `pyproject.toml` declares `asyncio_mode = "strict"` and `testpaths = ["tests"]`.
 
 ### ATLAS Plugin (`packages/askpanda_atlas/`)
 
@@ -189,10 +168,17 @@ Thread-safe in-process TTL cache keyed on URL strings. Protects a `dict[str, (ex
 
 #### Task Status (`task_status_impl.py`)
 
-Endpoint: `GET /jobs/?jeditaskid={task_id}&json` (richer than the task endpoint — returns full job list).
+Makes **two HTTP requests** per query:
+
+1. `GET /jobs/?jeditaskid={task_id}&json` — full job list; used to build per-status/per-site/per-error-code counts via `build_evidence(PandaTaskData(payload))`.
+2. `GET /task/{task_id}/?json` — task-level metadata; extracts the definitive `status` and `superstatus` fields (e.g. `"finished"`) that reflect the overall task outcome regardless of individual job failures. Best-effort — failure still returns job-level data.
+
+The task-level fields (`task_status`, `task_superstatus`, `taskname`, `username`, `creationdate`, `starttime`, `endtime`, `dsinfo`, `pctfinished`, `totev`, `totevproc`, `task_monitor_url`) are merged into the evidence dict **before** job-level fields so they appear first in the sorted compact JSON sent to the LLM.
+
+`_fetch_task_meta()` handles both BigPanDA response shapes: status nested under a `"task"` key or at the top level. Field name variants (`"status"` and `"taskstatus"`) are both tried. Failures are logged via `_trace()` to the bamboo trace file (visible in TUI `/tracing` even under `BAMBOO_QUIET=1`) and silently return `{}`.
 
 Public surface:
-- `fetch_and_analyse(base_url, task_id) -> dict` — fetches via `cached_fetch_jsonish`, builds compact evidence with `build_evidence(PandaTaskData(payload))`, attaches `raw_payload` for the evidence store.
+- `fetch_and_analyse(base_url, task_id) -> dict` — synchronous; call via `asyncio.to_thread()`.
 - `PandaTaskStatusTool` / `get_definition()` / `panda_task_status_tool` singleton.
 
 All `bamboo.tools.base` imports are deferred inside `call()` — never at module level — so the module is importable without bamboo installed (required by the fallback shim).
@@ -201,7 +187,7 @@ All `bamboo.tools.base` imports are deferred inside `call()` — never at module
 
 - `PandaJob` — wraps a raw job dict. Exposes typed properties (`pandaid`, `jobstatus`, `computingsite`, `piloterrorcode`, `jeditaskid`, etc.).
 - `PandaTaskData` — wraps the full jobs-endpoint payload. Exposes `jobs: list[PandaJob]`, `selectionsummary`, `errsByCount`.
-- `build_evidence(task)` — produces the compact evidence dict sent to the LLM: `jobs_by_status`, `jobs_by_site`, `jobs_by_piloterrorcode`, `failed_jobs_sample` (≤ 20), `finished_jobs_sample` (≤ 5), `task_summary`, and `pandaid_list` (inlined only when ≤ 500 jobs).
+- `build_evidence(task)` — produces the compact evidence dict sent to the LLM: `jobs_by_status`, `jobs_by_site`, `jobs_by_piloterrorcode`, `errs_by_count`, `failed_jobs_sample` (≤ 20 slim dicts), `finished_jobs_sample` (≤ 5), `failed_pandaids` (flat `list[int]` of PanDA IDs from the failed sample — easier for LLMs to extract than digging through `failed_jobs_sample`), `task_summary`, and `pandaid_list` (inlined only when ≤ 500 jobs). Note: `pandaid_list` is stripped from the LLM synthesis input and the evidence store (can be 50k entries); it remains accessible only via `/json`.
 
 #### Jobs Query (`jobs_query_impl.py`, `jobs_query_schema.py`)
 
@@ -253,27 +239,6 @@ Entry point registration in `pyproject.toml`:
 
 - `_fetch_metadata` uses `cached_fetch_jsonish` (60 s TTL).
 - `_fetch_log_text` uses `cached_fetch_log` (infinite TTL).
-
-### ePIC Plugin (`packages/askpanda_epic/`)
-
-The ePIC plugin provides the same tool surface as the ATLAS plugin for the tools available at this stage. It shares three modules verbatim with ATLAS — `_fallback_http.py`, `_cache.py`, and `panda_task_schema.py` — since both experiments use the same BigPanDA API and JSON response shape.
-
-**Modules unique to the ePIC plugin:**
-
-- `task_status.py` / `task_status_impl.py` — shim + implementation; identical structure to ATLAS equivalents.
-- `log_analysis.py` / `log_analysis_impl.py` — shim + implementation; identical structure.
-- `doc_rag.py` — `EpicDocSearchTool(PandaDocSearchTool)` subclass. Overrides `get_definition()` (description mentions ePIC/EIC) and `_ensure_collection()` (defaults `BAMBOO_CHROMA_COLLECTION` to `epic_docs` instead of `bamboo_docs`). All query logic inherited from core.
-- `doc_bm25.py` — `EpicDocBM25Tool(PandaDocBM25Tool)` subclass. Same override pattern.
-- `ui_manifest.py` — `EpicUiManifestTool`. Returns `plugin_id="epic"`, `accent="green"`, and the ePIC ASCII banner.
-- `banner.txt` — ASCII art banner (`AskPanDA -- ePIC`, slant font, 79 columns). Loaded via `importlib.resources`; inline fallback present in `_load_banner_lines()`.
-
-**Key design decisions:**
-
-- `PANDA_BASE_URL` is the single env var for both ATLAS and ePIC — operators point it at the correct instance per deployment. No separate `EPIC_PANDA_BASE_URL`.
-- `BAMBOO_CHROMA_COLLECTION` defaults to `epic_docs` in ePIC doc tools (vs `bamboo_docs` in core). Both experiments can coexist in the same ChromaDB directory under different collection names.
-- `bamboo.tools.base` imports are deferred inside `call()` throughout, matching the ATLAS convention.
-
-**Tests:** `packages/askpanda_epic/tests/test_narrow_waist.py` verifies the MCP narrow-waist return type and schema contract for all five ePIC tools. HTTP calls are intercepted at `askpanda_epic._fallback_http.fetch_jsonish`; ChromaDB calls are intercepted by patching `_ensure_collection` and `_ensure_index` directly on the subclass.
 
 ### Textual TUI (`interfaces/textual/chat.py`)
 
@@ -426,20 +391,15 @@ Each tool module must export:
 
 ### HTTP Cache Mock Pattern
 
-All tests that mock HTTP calls in ATLAS plugin tests must patch `"askpanda_atlas._cache.cached_fetch_jsonish"` (not `_fallback_http.fetch_jsonish`). For ePIC plugin tests that need to intercept at the HTTP boundary (e.g. in `test_narrow_waist.py`), patch `"askpanda_epic._fallback_http.fetch_jsonish"` — this is the correct intercept point because `cached_fetch_jsonish` imports `fetch_jsonish` from `_fallback_http` at call time. Mock signatures must include `timeout`:
+All tests that mock HTTP calls must patch `"askpanda_atlas._cache.cached_fetch_jsonish"` (not `_fallback_http.fetch_jsonish`). Mock signatures must include `timeout`:
 
 ```python
 def _ok_response(raw): return (200, "application/json", json.dumps(raw), raw)
 def _err_response(status=404): return (status, "text/html", "", None)
 
-# ATLAS plugin tests:
+# In tests:
 with patch("askpanda_atlas._cache.cached_fetch_jsonish",
            lambda url, timeout=30: _ok_response(raw)):
-    ...
-
-# ePIC narrow-waist test:
-with patch("askpanda_epic._fallback_http.fetch_jsonish",
-           MagicMock(return_value=(200, "application/json", "{}", {"status": "done"}))):
     ...
 ```
 
