@@ -317,9 +317,13 @@ async def fetch_and_analyse(
     # Aggregation queries (GROUP BY) use MAX_ROWS_AGGREGATION so the
     # fetchmany cap never truncates results that the guard already allowed.
     import sqlglot as _sqlglot  # deferred to avoid module-level cost
+    import sqlglot.expressions as _exp  # deferred
     try:
         _stmts = _sqlglot.parse(sanitised_sql, dialect="duckdb")
-        _is_agg = _sql_has_group_by(_stmts[0]) if _stmts and _stmts[0] else False
+        _first = _stmts[0] if _stmts else None
+        _is_agg = (
+            isinstance(_first, _exp.Select) and _sql_has_group_by(_first)
+        )
     except Exception:  # noqa: BLE001
         _is_agg = False
     fetch_cap = MAX_ROWS_AGGREGATION if _is_agg else MAX_ROWS

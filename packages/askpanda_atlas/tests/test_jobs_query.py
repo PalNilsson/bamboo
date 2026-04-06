@@ -651,9 +651,15 @@ class TestDatabaseDisambiguation:
         self._dbs = QUERYABLE_DATABASES
 
     def test_single_db_always_resolves(self) -> None:
-        """With only one database registered, any question resolves to it."""
-        assert len(self._dbs) == 1
-        result = self._resolve("When was the database last updated?")
+        """Questions with jobs-only keywords always resolve to the jobs DB.
+
+        Previously this test asserted len(self._dbs) == 1, but CRIC is now
+        registered as a second database.  The relevant invariant is that
+        jobs-specific keywords (e.g. 'jobs', 'failed') still unambiguously
+        resolve to 'jobs'.
+        """
+        assert "jobs" in self._dbs
+        result = self._resolve("How many jobs failed at BNL?")
         assert result == "jobs"
 
     def test_jobs_keywords_resolve_to_jobs(self) -> None:
