@@ -15,6 +15,7 @@ dependencies = [
 "atlas.jobs_query" = "askpanda_atlas.jobs_query:panda_jobs_query_tool"
 "atlas.harvester_workers" = "askpanda_atlas.harvester_worker:panda_harvester_workers_tool"
 "atlas.panda_server_health" = "askpanda_atlas.panda_server_health:panda_server_health_tool"
+"atlas.cric_query" = "askpanda_atlas.cric_query:cric_query_tool"
 "atlas.doc_search" = "askpanda_atlas.doc_rag:atlas_doc_search_tool"
 "atlas.doc_bm25" = "askpanda_atlas.doc_bm25:atlas_doc_bm25_tool"
 
