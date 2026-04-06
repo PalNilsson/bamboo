@@ -327,23 +327,34 @@ def _friendly_llm_error(exc: LLMError) -> str:
 #: comes online (e.g. CRIC).  The jobs DB entry must always be present.
 QUERYABLE_DATABASES: dict[str, str] = {
     "jobs": "PanDA jobs database (computing site job statistics, error counts)",
-    # Uncomment when CRIC integration is ready:
-    # "cric": "CRIC (Computing Resource Information Catalogue — sites, queues, pledges)",
+    "cric": "CRIC (Computing Resource Information Catalogue — queues, sites, copytools)",
 }
 
 #: Words that unambiguously identify a specific database in the question.
 #: Each key must match a key in :data:`QUERYABLE_DATABASES`.
+#:
+#: Design note: ``"queue"`` and ``"computing site"`` are intentionally absent
+#: from the jobs keyword set.  In the single-DB era they were useful synonyms
+#: for PanDA computing sites, but now that CRIC is registered these terms are
+#: strongly associated with CRIC queue objects.  Keeping them in the jobs set
+#: would make almost every CRIC question hit both keyword sets, producing a
+#: spurious disambiguation prompt instead of routing to CRIC.
+#: Similarly ``"site"`` alone is too generic to pin to either DB and is absent
+#: from both sets — CRIC site questions are caught by ``_is_cric_question()``
+#: (via ``"copytool"``, ``"maxwalltime"``, etc.) before disambiguation runs.
 _DB_KEYWORDS: dict[str, frozenset[str]] = {
     "jobs": frozenset({
         "job", "jobs", "failed", "failing", "running", "finished",
         "starting", "waiting", "error", "errors", "pilot", "pandaid",
-        "queue", "computing site", "bnl", "cern", "aglt2", "slac",
+        "bnl", "cern", "aglt2", "slac",
         "swt2", "triumf", "in2p3", "nikhef", "pic", "sara",
     }),
-    # "cric": frozenset({
-    #     "cric", "pledge", "resource", "capacity", "site capacity",
-    #     "cpu pledge", "disk pledge",
-    # }),
+    "cric": frozenset({
+        "cric", "copytool", "online", "offline", "pledge", "resource",
+        "capacity", "maxwalltime", "maxmemory", "corecount", "cpu slots",
+        "queue status", "queue online", "queue offline",
+        "queue", "queues",
+    }),
 }
 
 
@@ -400,7 +411,7 @@ def _build_clarification_response(question: str) -> str:
     )
 
 
-# Signal words that, when present in a question without a task/job ID, suggest
+# Signal phrases that, when present in a question without a task/job ID, suggest
 # the user is asking about live job statistics from the ingestion database
 # rather than a documentation or task-level question.
 _JOBS_DB_SIGNALS: frozenset[str] = frozenset({
@@ -498,6 +509,92 @@ def _is_jobs_db_question(question: str) -> bool:
     if "task" in q:
         return False
     return any(sig in q for sig in _JOBS_DB_SIGNALS)
+
+
+# Signal phrases that unambiguously indicate a CRIC queue/resource question.
+# These bypass the topic guard for clearly on-topic CRIC questions.
+# Phrases are matched against the lowercased question string.
+# Note: "queue" and "site" alone are intentionally absent — they are also
+# present in _DB_KEYWORDS["jobs"], making them ambiguous triggers that should
+# invoke the disambiguation flow rather than routing directly to CRIC.
+_CRIC_SIGNALS: frozenset[str] = frozenset({
+    # Unambiguous CRIC-only terminology
+    "cric",
+    "copytool",
+    "maxwalltime",
+    "maxmemory",
+    "corecount",
+    "cpu slots",
+    "brokeroff",
+    # Queue-state phrasing: "queue(s) <status>" or "<status> queue(s)"
+    # These are always CRIC because CRIC is the queue catalogue.
+    "queue online",
+    "queue offline",
+    "queue status",
+    "queues online",
+    "queues offline",
+    "queues active",
+    "queues are online",
+    "queues are offline",
+    "queues are active",
+    "queues are not online",
+    "queues are not active",
+    "queues that are not online",
+    "queues that are not active",
+    "queues that are offline",
+    "queues not online",
+    "queues not active",
+    "active queues",
+    "online queues",
+    "offline queues",
+    "inactive queues",
+    "is the queue",
+    "is the bnl queue",
+    "is the cern queue",
+    "cric queues",
+    "panda queues",
+    # Site-capacity / resource questions
+    "cpu pledge",
+    "disk pledge",
+    "site capacity",
+    "resource information",
+})
+
+
+def _is_cric_question(question: str) -> bool:
+    """Return ``True`` when the question looks like a CRIC resource lookup.
+
+    Detects questions about queue status, copytools, or site capacity that
+    are best answered by querying the CRIC DuckDB database rather than the
+    documentation index.
+
+    Two detection strategies:
+
+    1. **Signal phrase match** — any phrase in :data:`_CRIC_SIGNALS` appears
+       as a substring of the lowercased question.
+    2. **Queue + status combo** — the question contains a queue-reference word
+       (``"queue"`` or ``"queues"``) AND a queue-status word (``"active"``,
+       ``"online"``, ``"offline"``, ``"brokeroff"``, ``"test"``).  This catches
+       patterns like ``"Which queues at BNL are active?"`` where the status
+       word appears after a site name, so no single ``_CRIC_SIGNALS`` substring
+       would match.
+
+    Args:
+        question: User question text (before any normalisation).
+
+    Returns:
+        ``True`` if the question should be routed to ``cric_query``.
+    """
+    q = question.lower()
+    if any(sig in q for sig in _CRIC_SIGNALS):
+        return True
+    # Strategy 2: queue-reference + status word anywhere in the sentence.
+    has_queue_word = "queue" in q or "queues" in q
+    if has_queue_word:
+        _QUEUE_STATUS_WORDS = ("active", "online", "offline", "brokeroff")
+        if any(w in q for w in _QUEUE_STATUS_WORDS):
+            return True
+    return False
 
 
 # Signal phrases that unambiguously indicate a Harvester pilot/worker question.
@@ -826,6 +923,23 @@ def _build_deterministic_plan(
             explain="Deterministic: pilot/Harvester signals, no task/job ID → harvester workers.",
         )
 
+    # CRIC fast-path: checked before jobs DB because CRIC signals are more
+    # specific (copytool, maxwalltime, queue online/offline, etc.) and should
+    # win when both _is_cric_question and _is_jobs_db_question fire together —
+    # e.g. "which queues are using the rucio copytool?" hits _JOBS_DB_SIGNALS
+    # via "which queues" but is unambiguously a CRIC question.
+    if _is_cric_question(question):
+        return Plan(
+            route=PlanRoute.FAST_PATH,
+            confidence=0.9,
+            tool_calls=[ToolCall(
+                tool="cric_query",
+                arguments={"question": question},
+            )],
+            reuse_policy=reuse,
+            explain="Deterministic: CRIC signals, no task/job ID → CRIC query.",
+        )
+
     # Jobs DB fast-path: no IDs but the question is about live job stats.
     if _is_jobs_db_question(question):
         return Plan(
@@ -1141,6 +1255,182 @@ def _resolve_contextual_ids(
     return task_id, job_id
 
 
+# Patterns that indicate a short status-check follow-up about a specific queue.
+# Matched against the lowercased question string.  All are short enough that
+# they can only make sense in the context of a prior CRIC exchange.
+_CRIC_FOLLOWUP_PATTERNS: re.Pattern[str] = re.compile(
+    r"(?i)^\s*(?:"
+    r"is\s+\S+\s+(?:active|online|offline|available|ok|up|down|brokeroff|test)"
+    r"|(?:what|show)\s+(?:is|are)\s+(?:the\s+)?(?:status|state)\s+of\s+\S+"
+    r"|(?:status|state)\s+of\s+\S+"
+    r"|is\s+(?:that|this|it)\s+(?:queue|site)?\s*(?:active|online|offline|up|down)?"
+    r"|(?:what\s+about|and)\s+\S+"
+    r")\s*\??\s*$"
+)
+
+#: CRIC-specific vocabulary that, when present in any history turn, signals
+#: the prior exchange involved the CRIC tool.
+_CRIC_HISTORY_SIGNALS: frozenset[str] = frozenset({
+    "copytool", "cric", "queuedata", "atlas_site", "brokeroff",
+    "objectstore", "gfalcopy", "rucio copytool",
+})
+
+
+def _last_tool_was_cric(history: Sequence[Any]) -> bool:
+    """Return True when the most recent assistant turn contains CRIC evidence.
+
+    Scans the last assistant message in *history* for vocabulary that
+    indicates the prior response came from the ``cric_query`` tool — e.g.
+    copytool names, the word "cric", or queue-status terminology that only
+    appears in CRIC answers.
+
+    Args:
+        history: Prior conversation turns in chronological order.
+
+    Returns:
+        ``True`` if the most recent assistant message looks like a CRIC
+        query response.
+    """
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            content = str(msg.get("content", "")).lower()
+            return any(sig in content for sig in _CRIC_HISTORY_SIGNALS)
+    return False
+
+
+def _is_cric_followup(question: str) -> bool:
+    """Return True when *question* is a short queue-status follow-up.
+
+    Detects questions like "Is BNL-PTEST active?", "What is the status of
+    CERN-PROD?", or "And that queue?" that carry no CRIC-specific keywords
+    but are unambiguously about a queue status when history shows the prior
+    turn was a CRIC response.
+
+    Only matches short questions (≤ :data:`_MEDIUM_FOLLOWUP_WORD_LIMIT` + 2
+    words) to avoid capturing general knowledge questions that happen to
+    mention a site name.
+
+    Args:
+        question: The current user question text.
+
+    Returns:
+        ``True`` if the question looks like a CRIC status follow-up.
+    """
+    q = question.strip()
+    if not q:
+        return False
+    if len(q.split()) > _MEDIUM_FOLLOWUP_WORD_LIMIT + 2:
+        return False
+    return bool(_CRIC_FOLLOWUP_PATTERNS.match(q))
+
+
+async def _run_db_query_fast_path(
+    question: str,
+    history: list[Message],
+) -> "list[MCPContent] | None":
+    """Route jobs-DB or CRIC questions to the appropriate query tool.
+
+    Called from :func:`_run_fast_path_intercepts` when neither pilot nor
+    site-health signals are present.  Handles four cases:
+
+    1. **CRIC contextual follow-up** — the previous exchange used ``cric_query``
+       and the current question is a short follow-up about a queue or site that
+       appeared in that response (e.g. "Is BNL-PTEST active?" after a copytool
+       query) → route to ``cric_query``.
+    2. **CRIC-only signals** (``_is_cric_question`` true, ``_is_jobs_db_question``
+       false) → route directly to ``cric_query``.
+    3. **Jobs-DB signals with disambiguation** (``_is_jobs_db_question`` true,
+       multiple DBs registered) → call ``_resolve_target_database``.  If the
+       result is ``None`` (ambiguous) return a clarification response; if it
+       resolves to ``"cric"`` fall through to the CRIC path; otherwise build a
+       jobs plan.
+    4. **Jobs-DB signals, single DB** → build a jobs plan directly.
+
+    Args:
+        question: The current user question.
+        history: Prior conversation turns.
+
+    Returns:
+        A synthesised MCP content list, a clarification response, or ``None``
+        if no fast-path matched.
+    """
+    is_jobs = _is_jobs_db_question(question)
+    is_cric = _is_cric_question(question)
+
+    # When the user replies to a clarification prompt with just a database
+    # name (e.g. "cric" or "jobs"), reconstruct the original question from
+    # the last user turn in history and route to the named database.
+    bare_db_reply = question.strip().lower()
+    if bare_db_reply in QUERYABLE_DATABASES and history:
+        original = _last_user_question(history)
+        if original and original.strip().lower() not in QUERYABLE_DATABASES:
+            if bare_db_reply == "cric":
+                cric_plan = Plan(
+                    route=PlanRoute.FAST_PATH,
+                    confidence=0.95,
+                    tool_calls=[ToolCall(
+                        tool="cric_query",
+                        arguments={"question": original},
+                    )],
+                    reuse_policy=ReusePolicy(),
+                    explain="Deterministic: user selected 'cric' after clarification → cric_query.",
+                )
+                return await execute_plan(cric_plan, original, history)
+            if bare_db_reply == "jobs":
+                jobs_plan = Plan(
+                    route=PlanRoute.FAST_PATH,
+                    confidence=0.95,
+                    tool_calls=[ToolCall(
+                        tool="panda_jobs_query",
+                        arguments={"question": original},
+                    )],
+                    reuse_policy=ReusePolicy(),
+                    explain="Deterministic: user selected 'jobs' after clarification → jobs query.",
+                )
+                return await execute_plan(jobs_plan, original, history)
+
+    # CRIC contextual follow-up: if the prior exchange used cric_query, a
+    # short follow-up about a queue or site should stay in CRIC even if it
+    # contains no CRIC-specific keywords (e.g. "Is BNL-PTEST active?").
+    if not is_jobs and not is_cric and history:
+        if _last_tool_was_cric(history) and _is_cric_followup(question):
+            cric_plan = Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=0.85,
+                tool_calls=[ToolCall(
+                    tool="cric_query",
+                    arguments={"question": question},
+                )],
+                reuse_policy=ReusePolicy(),
+                explain="Deterministic: CRIC contextual follow-up → cric_query.",
+            )
+            return await execute_plan(cric_plan, question, history)
+
+    if is_jobs:
+        if len(QUERYABLE_DATABASES) > 1:
+            target_db = _resolve_target_database(question)
+            if target_db is None:
+                return text_content(_build_clarification_response(question))
+            if target_db == "jobs":
+                fast_plan = _build_deterministic_plan(question, None, None)
+                if fast_plan is not None:
+                    return await execute_plan(fast_plan, question, history)
+                return None
+            # target_db is some other DB (e.g. "cric") — fall through below.
+        else:
+            fast_plan = _build_deterministic_plan(question, None, None)
+            if fast_plan is not None:
+                return await execute_plan(fast_plan, question, history)
+            return None
+
+    if is_cric:
+        fast_plan = _build_deterministic_plan(question, None, None)
+        if fast_plan is not None:
+            return await execute_plan(fast_plan, question, history)
+
+    return None
+
+
 async def _run_fast_path_intercepts(
     question: str,
     history: list[Message],
@@ -1236,15 +1526,11 @@ async def _run_fast_path_intercepts(
             if fast_plan is not None:
                 return await execute_plan(fast_plan, question, history)
 
-        # Jobs DB fast-path.
-        if _is_jobs_db_question(question):
-            if len(QUERYABLE_DATABASES) > 1:
-                target_db = _resolve_target_database(question)
-                if target_db is None:
-                    return text_content(_build_clarification_response(question))
-            fast_plan = _build_deterministic_plan(question, None, None)
-            if fast_plan is not None:
-                return await execute_plan(fast_plan, question, history)
+        # Jobs DB fast-path and CRIC fast-path — handled by shared helper
+        # that also performs multi-DB disambiguation.
+        db_result = await _run_db_query_fast_path(question, history)
+        if db_result is not None:
+            return db_result
 
     return None
 
@@ -1471,10 +1757,16 @@ __all__ = [
     "_resolve_target_database",
     "_build_clarification_response",
     "_is_jobs_db_question",
+    "_is_cric_question",
     "_is_pilot_question",
     "_is_site_health_question",
     "_is_panda_health_question",
     "_extract_site_from_question",
     "_extract_time_window_from_question",
+    "_run_db_query_fast_path",
+    "_last_tool_was_cric",
+    "_is_cric_followup",
     "_PILOT_SIGNALS",
+    "_CRIC_SIGNALS",
+    "_CRIC_HISTORY_SIGNALS",
 ]

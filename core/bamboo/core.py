@@ -70,6 +70,12 @@ try:
     _PANDA_SERVER_HEALTH_AVAILABLE = True
 except ImportError:
     _PANDA_SERVER_HEALTH_AVAILABLE = False
+
+try:
+    from askpanda_atlas.cric_query import cric_query_tool  # type: ignore[import]
+    _CRIC_QUERY_AVAILABLE = True
+except ImportError:
+    _CRIC_QUERY_AVAILABLE = False
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.bamboo_answer import bamboo_answer_tool
 from bamboo.tools.planner import bamboo_plan_tool
@@ -100,6 +106,8 @@ if _HARVESTER_WORKERS_AVAILABLE:
     TOOLS["panda_harvester_workers"] = panda_harvester_workers_tool
 if _PANDA_SERVER_HEALTH_AVAILABLE:
     TOOLS["panda_server_health"] = panda_server_health_tool
+if _CRIC_QUERY_AVAILABLE:
+    TOOLS["cric_query"] = cric_query_tool
 
 
 def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:

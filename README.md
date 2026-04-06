@@ -7,8 +7,10 @@ LLMs are used for *summarisation and explanation*, not as sources of truth.
 Structured evidence is always returned alongside natural-language answers.
 
 > **Status (April 2026):** core infrastructure is stable; the ePIC plugin is
-> newly added and expanding. The current focus is multi-experiment support and
-> orchestration using tool families and planning for complex multi-step prompts.
+> newly added and expanding. The ATLAS plugin now includes `cric_query` for
+> natural-language queries against the CRIC Computing Resource Information
+> Catalogue. The current focus is multi-experiment support and orchestration
+> using tool families and planning for complex multi-step prompts.
 
 ---
 
@@ -185,6 +187,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | [`docs/interfaces.md`](docs/interfaces.md) | TUI, Streamlit UI, HTTP transport, context memory |
 | [`docs/plugins.md`](docs/plugins.md) | Writing and registering plugins |
 | [`docs/jobs-database.md`](docs/jobs-database.md) | Live PanDA jobs DB queries — schema, examples, guard rules, routing |
+| [`docs/cric-database.md`](docs/cric-database.md) | CRIC queuedata queries — schema, examples, guard rules, routing, disambiguation |
 | [`docs/rag.md`](docs/rag.md) | RAG pipeline (ChromaDB + BM25) |
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
@@ -212,6 +215,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | `atlas.jobs_query` | `panda_jobs_query` | Natural language → SQL against the ingestion DuckDB |
 | `atlas.harvester_workers` | `panda_harvester_workers` | Live Harvester pilot/worker counts |
 | `atlas.panda_server_health` | `panda_server_health` | PanDA server liveness via PanDA MCP |
+| `atlas.cric_query` | `cric_query` | Natural language → SQL against the CRIC queuedata DuckDB |
 | `atlas.ui_manifest` | `atlas.ui_manifest` | TUI branding (banner, accent colour, display name) |
 
 Set `BAMBOO_CHROMA_COLLECTION=atlas_docs` when running the ATLAS deployment to

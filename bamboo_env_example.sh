@@ -20,6 +20,14 @@ export PANDA_DUCKDB_PATH="jobs.duckdb"
 # Optional: maximum rows returned by panda_jobs_query (default: 500).
 # export PANDA_JOBS_QUERY_MAX_ROWS="500"
 
+# Path to the CRIC queuedata DuckDB file written by the cric_agent.
+# Used by the cric_query tool (atlas.cric_query).
+# Defaults to "cric.duckdb" in the current working directory if unset.
+export CRIC_DUCKDB_PATH="${HOME}/.askpanda/cric.duckdb"
+
+# Optional: maximum rows returned by cric_query (default: 200).
+# export CRIC_QUERY_MAX_ROWS="200"
+
 ########################################
 # LLM PROFILE SELECTION
 ########################################

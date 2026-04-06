@@ -80,11 +80,12 @@ TOOLS = {
     "panda_job_status":        panda_job_status_tool,
     "panda_log_analysis":      panda_log_analysis_tool,
     "panda_jobs_query":        panda_jobs_query_tool,     # NL→SQL against ingestion DuckDB
+    "cric_query":              cric_query_tool,            # NL→SQL against CRIC queuedata DuckDB
     "panda_harvester_workers": panda_harvester_workers_tool, # Harvester pilot/worker stats
     "panda_server_health":     panda_server_health_tool,  # PanDA server liveness via PanDA MCP
 }
-# panda_jobs_query, panda_harvester_workers, and panda_server_health are
-# conditionally added after the dict if askpanda_atlas is installed.
+# panda_jobs_query, cric_query, panda_harvester_workers, and panda_server_health
+# are conditionally added after the dict if askpanda_atlas is installed.
 ```
 
 ### Routing (`core/bamboo/tools/bamboo_answer.py`)
@@ -99,7 +100,8 @@ TOOLS = {
   2. **Implicit short follow-up**: ≤ 10 words + status-specific domain term (`"failed"`, `"finished"`, `"running"`, etc.) — only applies the found ID if history actually contains one.
 - **`_build_deterministic_plan(rag_query, task_id, job_id)`** — fast-path routing without an LLM call: job ID + analysis keywords → `panda_log_analysis`; job ID → `panda_job_status`; task ID → `panda_task_status`; pilot/Harvester signals (no IDs) → `panda_harvester_workers`; jobs DB signals (no IDs) → `panda_jobs_query`; no IDs → RAG retrieval. The pilot rule runs before the jobs DB rule because the word "pilot" can co-occur with jobs DB signal phrases.
 - **`_is_pilot_question(question)`** — returns `True` when the question contains pilot/Harvester signal phrases (`"pilot"`, `"pilots"`, `"harvester worker"`, `"nworkers"`, `"pilot count"`, etc.) regardless of site or time expression. Used by the pilot fast-path intercept to bypass the topic guard for clearly on-topic pilot queries.
-- **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases (`"failed at"`, `"top errors"`, `"each status"`, `"which queues"`, `"last updated"`, etc.) and no `"task"` keyword. Used by the fast-path intercept to skip the topic guard for clearly on-topic DB queries.
+- **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases (`"failed at"`, `"top errors"`, `"each status"`, `"last updated"`, etc.) and no `"task"` keyword. Used by the fast-path intercept to skip the topic guard for clearly on-topic jobs DB queries.
+- **`_is_cric_question(question)`** — returns `True` when the question is about CRIC queuedata (queue status, copytools, site resources). Uses two strategies: (1) substring match against `_CRIC_SIGNALS` (phrases like `"cric"`, `"copytool"`, `"brokeroff"`, `"active queues"`, `"queue online"`, etc.); (2) presence of `"queue"`/`"queues"` AND a status word (`"active"`, `"online"`, `"offline"`, `"brokeroff"`) anywhere in the question — catches patterns like `"Which queues at BNL are active?"`. CRIC signals take priority over jobs signals in `_build_deterministic_plan`.
 - **`_is_site_health_question(question)`** — returns `True` when the question contains signals from **both** `_PILOT_SIGNALS` and either `_JOBS_DB_SPECIFIC_SIGNALS` or any bare occurrence of the word `"job"` / `"jobs"` (matched with word boundaries via `re.search(r"\bjobs?\b", q)`). The word-boundary check handles natural phrasing like `"pilot and job failure rates"` without false-positives on `"how many pilots?"`. Questions with a `"task"` keyword are excluded.
 - **`_JOBS_DB_SPECIFIC_SIGNALS`** — the job-specific subset of `_JOBS_DB_SIGNALS` used by `_is_site_health_question`. Excludes generic counting phrases (`"how many"`, `"count"`) and status-at phrases (`"ran at"`, `"failed at"`) that can appear in pure pilot questions.
 - **`_extract_site_from_question(question)`** — extracts a computing site name using two strategies: (1) a contextual regex matching tokens after `at/for/from/site/queue` that filters out stop-words and requires the token to look like an ATLAS site (has digit, separator char, or is all-uppercase); (2) a short fallback list for sites used without a preposition. Handles arbitrary site names like MWT2, SLAC-SCS, CERN\_PROD, SWT2\_CPB without requiring them to be pre-registered.
@@ -109,7 +111,7 @@ The **site-health fast-path** (in `_run_fast_path_intercepts`) builds a two-tool
 
 `bamboo_answer` accepts a `bypass_fast_path: bool` argument (default `False`). When `True`, both `_run_fast_path_intercepts()` and `_build_deterministic_plan()` are skipped — the question falls through to the topic guard and LLM planner. Exposed via the TUI `/fastpath off` command for testing planner routing on questions that would normally be short-circuited.
 - **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases (`"failed at"`, `"top errors"`, `"each status"`, `"which queues"`, `"last updated"`, etc.) and no `"task"` keyword. Used by the fast-path intercept to skip the topic guard for clearly on-topic DB queries.
-- **`QUERYABLE_DATABASES`** — registry of queryable databases (`{"jobs": "...", ...}`). Currently one entry; add `"cric"` when CRIC integration lands. When more than one entry is present, `_resolve_target_database()` is called to detect ambiguous questions; `_build_clarification_response()` prompts the user to specify which database they mean.
+- **`QUERYABLE_DATABASES`** — registry of queryable databases. Currently two entries: `"jobs"` (PanDA jobs ingestion DB) and `"cric"` (CRIC queuedata DB). When more than one entry is present, `_resolve_target_database()` is called to detect ambiguous questions; `_build_clarification_response()` prompts the user to specify which database they mean.
 
 Routing order in `_route()`:
 1. `bypass_routing` → direct LLM passthrough
@@ -118,7 +120,7 @@ Routing order in `_route()`:
    - **PanDA server health** — liveness/health question (no IDs) → `panda_server_health`. Checked first, before site-health, so "is PanDA alive?" is never mistaken for a job or site question.
    - **Site-health** — both pilot AND job-specific signals present → `panda_harvester_workers` + `panda_jobs_query` in one plan. Checked before individual pilot/jobs to prevent the pilot check from firing alone.
    - **Pilot-only** — pilot signals, no job signals → `panda_harvester_workers`.
-   - **Jobs DB** — jobs DB signals → `panda_jobs_query`. All four bypass the topic guard (~3s saved).
+   - **Jobs DB / CRIC** — handled by `_run_db_query_fast_path()`, which performs multi-DB disambiguation: jobs signals → `panda_jobs_query`; CRIC signals → `cric_query`; ambiguous → clarification response. Both bypass the topic guard (~3s saved).
 4. Topic guard + content-free followup reformulation
 5. ID extraction from question, then contextual ID resolution from history
 6. Deterministic fast-path plan
@@ -131,7 +133,7 @@ Routing order in `_route()`:
 - After each successful tool call, the full evidence dict (including `raw_payload`) is stored in `_last_evidence_store[tool_name]`, with `pandaid_list` stripped (can be 50k entries — would cause `/inspect` timeouts). `raw_payload` and `pandaid_list` are both **stripped before LLM synthesis** so the LLM only sees the compact evidence fields. Both are accessible via `/json` and `/inspect` respectively.
 - The compact JSON budget for each evidence block is **12,000 characters** (`_compact_json` limit), truncated with `…` if exceeded and sorted alphabetically. Task-level fields (`task_status`, `task_superstatus`, etc.) are merged first in the evidence dict so they sort before job-level fields.
 - `BambooLastEvidenceTool` (`bamboo_last_evidence`) exposes the store via MCP. Accepts `mode="evidence"` (compact dict, `raw_payload` excluded) or `mode="raw"` (verbatim BigPanDA API response). Used by the TUI `/inspect` and `/json` commands.
-- `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_server_health` → PanDA liveness prompt; `panda_harvester_workers` + `panda_jobs_query` together → site-health prompt (two labelled evidence sources); `panda_harvester_workers` alone → pilot stats prompt; `panda_jobs_query` alone → jobs DB prompt; `panda_doc_*` → RAG documentation; other → generic.
+- `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_server_health` → PanDA liveness prompt; `panda_harvester_workers` + `panda_jobs_query` together → site-health prompt (two labelled evidence sources); `panda_harvester_workers` alone → pilot stats prompt; `panda_jobs_query` alone → jobs DB prompt; `cric_query` → CRIC queuedata prompt; `panda_doc_*` → RAG documentation; other → generic.
 
 ### LLM Passthrough (`core/bamboo/tools/llm_passthrough.py`)
 
@@ -418,6 +420,8 @@ with patch("askpanda_atlas._cache.cached_fetch_jsonish",
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `MISTRAL_API_KEY` / `GEMINI_API_KEY` | Provider API keys |
 | `ASKPANDA_OPENAI_COMPAT_BASE_URL` | For vLLM/Ollama/custom OpenAI-compatible endpoints |
 | `PANDA_BASE_URL` | BigPanDA API base URL (default: `https://bigpanda.cern.ch`) |
+| `PANDA_DUCKDB_PATH` | Path to the PanDA jobs DuckDB file (default: `jobs.duckdb`) |
+| `CRIC_DUCKDB_PATH` | Path to the CRIC queuedata DuckDB file (default: `cric.duckdb`) |
 | `BAMBOO_TRACE` | `1` to enable structured tracing (default: off) |
 | `BAMBOO_TRACE_FILE` | Write trace spans to this file instead of stderr |
 | `BAMBOO_HISTORY_TURNS` | Max conversation turns held in context (default: 10) |
