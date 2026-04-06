@@ -192,6 +192,69 @@ What is the maxtime for queue SWT2_CPB?
 
 ---
 
+
+## CRIC queuedata (`cric_query`)
+
+Questions about ATLAS computing queue status, copytools, and site resources
+from the CRIC Computing Resource Information Catalogue.
+
+```
+Which queues are not online?
+How many queues are in each status?
+Which queues are using the rucio copytool?
+Which queues are NOT using the rucio copytool?
+Which queues are using the objectstore copytool?
+What copytools are in use?
+Which queues are active at BNL?
+Which queues at CERN-PROD are online?
+What is the status of all queues at BNL?
+Is BNL-PTEST online?
+Which MCORE queues are online at BNL?
+How many CPU cores are pledged at CERN-PROD?
+What sites are available in CRIC?
+When was the CRIC database last updated?
+Which queues are brokeroff?
+List queues in test status.
+```
+
+> **Expected routing:** `route=FAST_PATH`, tool = `cric_query`.
+> **Check with `/inspect`:** the evidence shows `sql`, `columns`, `rows`,
+> `row_count`, `truncated`, and `error` (null = success).
+> **Tip:** ask "What sites are available?" first to see the exact `atlas_site`
+> values — site names include suffixes like `BNL-ATLAS`, `CERN-PROD`, `CERN-T0`.
+
+### Multi-turn CRIC follow-ups
+
+After a CRIC response, short status-check follow-ups route back to CRIC
+automatically without needing explicit CRIC vocabulary.
+
+```
+# Turn 1
+Which queues are using the objectstore copytool?
+
+# Turn 2 (routes to cric_query via contextual follow-up detection)
+Is BNL-PTEST active?
+
+# Turn 3
+What about CERN-PTEST?
+```
+
+### Disambiguation
+
+Some questions match both the jobs DB and CRIC — the router asks which you
+mean.  You can reply with just `"cric"` or `"jobs"` and the original question
+will be re-executed against the chosen database.
+
+```
+# Ambiguous — triggers clarification
+Which queues have the most failed jobs?
+
+# Clearly CRIC — routes directly without asking
+Which queues use the rucio copytool?
+Which queues are not online?
+What is the queue status at BNL?
+```
+
 ## Documentation / RAG (`panda_doc_search` + `panda_doc_bm25`)
 
 General PanDA/ATLAS knowledge questions route to the vector + BM25 retrieval pipeline.
