@@ -435,7 +435,8 @@ class BambooTui(App):
     }
 
     #banner {
-        height: auto;
+        height: 9;
+        min-height: 9;
         padding: 1 2;
     }
 
@@ -1747,6 +1748,27 @@ class BambooTui(App):
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self._write_error(f"Could not fetch evidence: {exc}")
 
+    def _chart_width(self) -> int:
+        """Return a usable character width for ASCII chart content.
+
+        Reads the transcript widget width and subtracts space for the
+        Panel border (2), padding (2), and the y-axis label area (8),
+        leaving the remainder for the bar/column content.  Falls back
+        to 80 when the transcript size is not yet available.
+
+        Returns:
+            Integer character width for the chart bar area, at least 20.
+        """
+        try:
+            w = self.transcript.size.width
+        except Exception:  # pylint: disable=broad-exception-caught
+            try:
+                w = self.size.width
+            except Exception:  # pylint: disable=broad-exception-caught
+                w = 80
+        # 2 panel border + 2 panel padding + 8 y-axis labels + 2 safety margin
+        return max(20, w - 14)
+
     async def _try_auto_chart(self) -> None:
         """Silently append an ASCII pilot chart after a Harvester answer.
 
@@ -1791,7 +1813,7 @@ class BambooTui(App):
                 return
 
             # --- Status-bar chart (from snapshot evidence) ---
-            chart_str = render_chart(snapshot_ev, width=50, mode="auto")
+            chart_str = render_chart(snapshot_ev, width=self._chart_width(), mode="auto")
             self._write_panel(
                 Text(chart_str),
                 title=f"{_now()}  pilot chart",
@@ -1837,7 +1859,7 @@ class BambooTui(App):
             ts_ev = (ts_parsed.get("evidence") or ts_parsed)
             if ts_ev.get("error") or len(ts_ev.get("buckets") or []) < 2:
                 return
-            ts_chart = render_chart(ts_ev, width=60, mode="timeseries")
+            ts_chart = render_chart(ts_ev, width=self._chart_width(), mode="timeseries")
             self._write_panel(
                 Text(ts_chart),
                 title=f"{_now()}  pilot timeseries ({ts_status})",
@@ -1912,7 +1934,7 @@ class BambooTui(App):
                 )
                 return
 
-            chart_str = render_chart(evidence, width=50, mode="auto")
+            chart_str = render_chart(evidence, width=self._chart_width(), mode="auto")
             self._write_panel(
                 Text(chart_str),
                 title=f"{_now()}  pilot chart",

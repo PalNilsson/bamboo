@@ -266,20 +266,30 @@ def ascii_timeseries(
     min_count = min(counts)
     mean_count = sum(counts) / len(counts)
 
-    # Downsample if there are more buckets than available columns.
+    # Scale buckets to fill the available width.
+    # When there are fewer buckets than columns, each bucket occupies
+    # multiple characters so the chart fills the panel.
+    # When there are more buckets than columns, downsample instead.
     n = len(counts)
     if n > width:
+        # Downsample: map width columns onto n buckets.
         step = n / width
         counts_display = [counts[int(i * step)] for i in range(width)]
+        col_w = 1
     else:
+        # Upsample: each bucket gets at least one column, spread evenly.
+        col_w = max(1, width // n)
         counts_display = counts
 
-    # Build the grid: height rows × len(counts_display) cols.
-    rows: list[list[str]] = [[" "] * len(counts_display) for _ in range(height)]
-    for col, c in enumerate(counts_display):
+    # Build the grid: height rows × (len(counts_display) * col_w) cols.
+    total_cols = len(counts_display) * col_w
+    rows: list[list[str]] = [[" "] * total_cols for _ in range(height)]
+    for bucket_idx, c in enumerate(counts_display):
         bar_height = round((c / max_count) * height) if max_count > 0 else 0
         for row in range(height - bar_height, height):
-            rows[row][col] = _BAR_CHAR
+            for char_idx in range(col_w):
+                col = bucket_idx * col_w + char_idx
+                rows[row][col] = _BAR_CHAR
 
     def _value_to_row(v: int) -> int:
         """Map a worker-count value to the topmost filled row for that bar.
@@ -306,8 +316,9 @@ def ascii_timeseries(
     label_w = max(len(v) for v in tick_values.values())
 
     header = (
-        f"Harvester workers \u2013 {status}  "
+        f"Harvester workers reporting \u2013 {status}  "
         f"(min: {min_count:,}  max: {max_count:,}  mean: {mean_count:,.0f})"
+        f"  [update events per bucket, not total active pilots]"
     )
 
     lines: list[str] = [header]
@@ -321,7 +332,7 @@ def ascii_timeseries(
     # X-axis: first and last bucket timestamps (HH:MM only).
     first_ts = buckets[0]["timestamp"][11:16]
     last_ts = buckets[-1]["timestamp"][11:16]
-    pad = len(counts_display) - len(first_ts) - len(last_ts)
+    pad = total_cols - len(first_ts) - len(last_ts)
     x_axis = " " * (label_w + 2) + first_ts + " " * max(1, pad) + last_ts
     lines.append(x_axis)
 
