@@ -6,7 +6,7 @@ worker counts for a single status over a time window::
     GET atlas_harvesterworkers-*
     filter: @timestamp in [from_dt, to_dt]
     filter: status.keyword == <status>
-    filter: computingSite.keyword == <site>   (optional)
+    filter: computingsite.keyword == <site>   (optional)
     agg:    date_histogram on @timestamp with fixed_interval
 
 The bucket interval is derived automatically from the window duration so
@@ -197,14 +197,14 @@ def fetch_timeseries(
 
     The query applies a ``date_histogram`` aggregation over ``@timestamp``
     with a ``fixed_interval`` derived from the window (or supplied by the
-    caller).  An optional ``computingSite.keyword`` term filter scopes
+    caller).  An optional ``computingsite.keyword`` term filter scopes
     results to a single site.
 
     Args:
         status: Harvester worker status to filter on, e.g. ``"running"``.
         from_dt: ISO-8601 lower bound of the query window.
         to_dt: ISO-8601 upper bound of the query window.
-        site: Optional computing-site filter (``computingSite.keyword``).
+        site: Optional computing-site filter (``computingsite.keyword``).
         interval: OpenSearch ``fixed_interval`` override.  Derived
             automatically when ``None``.
         index: OpenSearch index pattern to query.
@@ -243,7 +243,7 @@ def fetch_timeseries(
         .extra(size=0)
     )
     if site:
-        s = s.filter("term", **{"computingSite.keyword": site})
+        s = s.filter("term", **{"computingsite.keyword": site})
 
     s.aggs.bucket(
         "counts_over_time",
@@ -351,7 +351,7 @@ def get_definition() -> dict[str, Any]:
                 },
                 "site": {
                     "type": "string",
-                    "description": "Optional computing-site filter, e.g. 'BNL'.",
+                    "description": "Optional computing-site filter (``computingsite.keyword`` field), e.g. 'BNL'.",
                 },
                 "interval": {
                     "type": "string",
