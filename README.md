@@ -188,6 +188,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | [`docs/plugins.md`](docs/plugins.md) | Writing and registering plugins |
 | [`docs/jobs-database.md`](docs/jobs-database.md) | Live PanDA jobs DB queries — schema, examples, guard rules, routing |
 | [`docs/cric-database.md`](docs/cric-database.md) | CRIC queuedata queries — schema, examples, guard rules, routing, disambiguation |
+| [`docs/harvester-workers.md`](docs/harvester-workers.md) | Harvester pilot/worker counts — API, evidence structure, routing, time windows |
 | [`docs/rag.md`](docs/rag.md) | RAG pipeline (ChromaDB + BM25) |
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
