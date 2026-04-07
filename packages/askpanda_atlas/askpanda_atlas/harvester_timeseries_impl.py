@@ -219,7 +219,6 @@ def fetch_timeseries(
         ImportError: If ``opensearch-py`` or ``opensearch-dsl`` are not
             installed.
     """
-    from opensearch_dsl import Search  # type: ignore[import]
     from askpanda_atlas._cache import _MISS, _get, _set  # type: ignore[import]
 
     effective_interval = interval or compute_interval(from_dt, to_dt)
@@ -232,7 +231,10 @@ def fetch_timeseries(
         logger.debug("panda_harvester_timeseries: cache hit for %s", cache_key)
         return cached  # type: ignore[return-value]
 
+    # create_os_client() validates ASKPANDA_OPENSEARCH before the import.
     client = create_os_client()
+
+    from opensearch_dsl import Search  # type: ignore[import]
 
     s = (
         Search(using=client, index=index)

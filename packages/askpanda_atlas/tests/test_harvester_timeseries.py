@@ -282,7 +282,11 @@ class TestFetchTimeseries:
         """RuntimeError is raised when ASKPANDA_OPENSEARCH is not set."""
         from askpanda_atlas._cache import clear as _clear_cache
         _clear_cache()  # ensure no cached result masks the missing-password path
-        with patch.dict(os.environ, {}, clear=True):
+        mock_os_dsl = MagicMock()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.dict(sys.modules, {"opensearch_dsl": mock_os_dsl}),
+        ):
             os.environ.pop("ASKPANDA_OPENSEARCH", None)
             with pytest.raises(RuntimeError, match="ASKPANDA_OPENSEARCH"):
                 fetch_timeseries("running", "2026-04-07T15:00:00", "2026-04-07T16:00:00")
