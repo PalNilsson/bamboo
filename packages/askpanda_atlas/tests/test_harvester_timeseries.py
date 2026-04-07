@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -220,16 +221,22 @@ class TestFetchTimeseries:
             List of ``{"timestamp", "count"}`` dicts.
         """
         mock_response = _mock_response(buckets)
+        # Stub the entire opensearch_dsl module so the deferred import inside
+        # fetch_timeseries succeeds even when the package is not installed.
+        mock_search = MagicMock()
+        mock_search.return_value.filter.return_value = mock_search.return_value
+        mock_search.return_value.extra.return_value = mock_search.return_value
+        mock_search.return_value.aggs.bucket.return_value = MagicMock()
+        mock_search.return_value.execute.return_value = mock_response
+        mock_os_dsl = MagicMock()
+        mock_os_dsl.Search = mock_search
         with (
             patch(
                 "askpanda_atlas.harvester_timeseries_impl.create_os_client",
                 return_value=MagicMock(),
             ),
-            patch(
-                "opensearch_dsl.Search.execute",
-                return_value=mock_response,
-            ),
             patch.dict(os.environ, {"ASKPANDA_OPENSEARCH": "test-password"}),
+            patch.dict(sys.modules, {"opensearch_dsl": mock_os_dsl}),
         ):
             # Invalidate any cached entry so the mock is actually called.
             from askpanda_atlas._cache import invalidate
@@ -301,6 +308,13 @@ class TestPandaHarvesterTimeseriesTool:
         """
         mock_text_content = lambda s: [{"type": "text", "text": s}]  # noqa: E731
         mock_response = _mock_response(buckets)
+        mock_search = MagicMock()
+        mock_search.return_value.filter.return_value = mock_search.return_value
+        mock_search.return_value.extra.return_value = mock_search.return_value
+        mock_search.return_value.aggs.bucket.return_value = MagicMock()
+        mock_search.return_value.execute.return_value = mock_response
+        mock_os_dsl = MagicMock()
+        mock_os_dsl.Search = mock_search
 
         with (
             patch(
@@ -308,14 +322,11 @@ class TestPandaHarvesterTimeseriesTool:
                 return_value=MagicMock(),
             ),
             patch(
-                "opensearch_dsl.Search.execute",
-                return_value=mock_response,
-            ),
-            patch(
                 "bamboo.tools.base.text_content",
                 side_effect=mock_text_content,
             ),
             patch.dict(os.environ, {"ASKPANDA_OPENSEARCH": "test-password"}),
+            patch.dict(sys.modules, {"opensearch_dsl": mock_os_dsl}),
         ):
             from askpanda_atlas._cache import invalidate
             invalidate("harvester_timeseries:running|||||5m")
