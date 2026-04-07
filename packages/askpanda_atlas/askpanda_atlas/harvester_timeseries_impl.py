@@ -149,14 +149,14 @@ def create_os_client() -> Any:
         RuntimeError: If ``ASKPANDA_OPENSEARCH`` is not set.
         ImportError: If ``opensearch-py`` is not installed.
     """
-    from opensearchpy import OpenSearch  # type: ignore[import]
-
     password = os.environ.get("ASKPANDA_OPENSEARCH", "")
     if not password:
         raise RuntimeError(
             "Environment variable ASKPANDA_OPENSEARCH is not set. "
             "Set it to your OpenSearch password to enable timeseries charts."
         )
+
+    from opensearchpy import OpenSearch  # type: ignore[import]
 
     host = os.environ.get("ASKPANDA_OPENSEARCH_HOST", _DEFAULT_HOST)
     user = os.environ.get("ASKPANDA_OPENSEARCH_USER", _DEFAULT_USER)

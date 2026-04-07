@@ -283,9 +283,13 @@ class TestFetchTimeseries:
         from askpanda_atlas._cache import clear as _clear_cache
         _clear_cache()  # ensure no cached result masks the missing-password path
         mock_os_dsl = MagicMock()
+        mock_os_py = MagicMock()
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.dict(sys.modules, {"opensearch_dsl": mock_os_dsl}),
+            patch.dict(sys.modules, {
+                "opensearch_dsl": mock_os_dsl,
+                "opensearchpy": mock_os_py,
+            }),
         ):
             os.environ.pop("ASKPANDA_OPENSEARCH", None)
             with pytest.raises(RuntimeError, match="ASKPANDA_OPENSEARCH"):
