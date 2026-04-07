@@ -69,6 +69,31 @@ def _serialise_row(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _db_mtime(duckdb_path: str) -> str | None:
+    """Return the database file's last-modified time as a compact UTC string.
+
+    Used to populate ``db_last_modified`` in evidence dicts so the TUI can
+    display a "Database last updated" footnote without an extra SQL query.
+
+    Args:
+        duckdb_path: Filesystem path to the DuckDB file.
+
+    Returns:
+        ISO-style UTC timestamp string (e.g. ``"2026-04-07 10:31 UTC"``), or
+        ``None`` when the path is ``":memory:"``, empty, or the file is absent.
+    """
+    import datetime  # deferred — only called at query time
+    if not duckdb_path or duckdb_path == ":memory:":
+        return None
+    try:
+        mtime = os.path.getmtime(duckdb_path)
+        return datetime.datetime.fromtimestamp(
+            mtime, tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M UTC")
+    except OSError:
+        return None
+
+
 def _execute_query(
     duckdb_path: str,
     sql: str,
@@ -338,6 +363,7 @@ async def fetch_and_analyse(
         "truncated": exec_result["truncated"],
         "execution_time_ms": exec_result["execution_time_ms"],
         "db_path": duckdb_path,
+        "db_last_modified": _db_mtime(duckdb_path),
         "error": None,
         "guard_rejection": None,
         "raw_payload": None,

@@ -427,8 +427,16 @@ class BambooTui(App):
         self._cmd_history_pos: int = -1           # Current position in _command_history (-1 = not browsing)
         self._thinking_task: Optional[Any] = None  # Textual Timer for animated thinking indicator
         self._last_spans: List[Dict[str, Any]] = []  # Trace spans for last request
+        # Session-level cost accumulators — updated after every completed request.
+        self._session_input_tokens: int = 0
+        self._session_output_tokens: int = 0
+        self._session_cost_usd: float = 0.0
+        self._session_request_count: int = 0
         self._trace_file: str = os.path.join(
             tempfile.gettempdir(), f"bamboo_trace_{os.getpid()}.jsonl"
+        )
+        self._cric_table_file: str = os.path.join(
+            tempfile.gettempdir(), f"bamboo_cric_table_{os.getpid()}.txt"
         )
         # Question queue — allows the user to keep typing while a response is
         # in progress.  Submitted questions are enqueued and drained one at a
@@ -844,6 +852,46 @@ class BambooTui(App):
             # Any other key resets history browsing.
             self._cmd_history_pos = -1
 
+    async def _fetch_cric_table(self, sentinel: str) -> str:
+        """Fetch the pre-formatted CRIC full-list table from the temp file.
+
+        ``execute_plan`` writes the full table to ``BAMBOO_CRIC_TABLE_FILE``
+        and returns only a short sentinel ``"__CRIC_TABLE_READY__:<N>"``
+        through the MCP pipe to avoid macOS pipe-buffer truncation (8 KB
+        limit for subprocess stdout pipes).  This method reads the table
+        directly from the temp file, which has no size restriction.
+
+        Args:
+            sentinel: The sentinel string from execute_plan, e.g.
+                ``"__CRIC_TABLE_READY__:230"``.
+
+        Returns:
+            The formatted table string, or a fallback message if the read fails.
+        """
+        row_count_str = sentinel.split(":", 1)[1].strip()
+        try:
+            row_count = int(row_count_str)
+        except ValueError:
+            row_count = 0
+        table_text = ""
+        read_error = ""
+        try:
+            with open(self._cric_table_file, "r", encoding="utf-8") as _fh:
+                table_text = _fh.read()
+        except FileNotFoundError:
+            read_error = f"File not found: {self._cric_table_file}"
+        except Exception as _exc:  # pylint: disable=broad-exception-caught
+            read_error = f"Read error: {_exc}"
+        if table_text:
+            return table_text
+        # Surface diagnostic info so the user can see what went wrong
+        diag = f" ({read_error})" if read_error else ""
+        return (
+            f"{row_count} PanDA queues — table file unavailable{diag}.\n"
+            f"Tip: the table was recovered via fetch-cap fallback. "
+            f"Try asking again after restarting the TUI to reload the server."
+        )
+
     async def _handle_question(self, question: str) -> None:
         """Send a question to the answer tool and render the response.
 
@@ -899,10 +947,24 @@ class BambooTui(App):
             res = await self._to_thread(self.mcp.call_tool, self.answer_tool, args)
             self._last_spans = self._collect_spans(_pre_pos)
             self._last_raw_result = res  # Available via /json
+            # Accumulate session totals from this request's spans.
+            _req_est = _estimate_cost(self._last_spans)
+            self._session_input_tokens += _req_est["total_input"]
+            self._session_output_tokens += _req_est["total_output"]
+            self._session_cost_usd += _req_est["total_cost_usd"]
+            self._session_request_count += 1
             if self.debug_mode:
                 self._write_tool(self.answer_tool, args, res)
 
             out = _extract_text(res) or "*(No text output; enable /debug on to see raw result.)*"
+
+            # CRIC full-list bypass: execute_plan returns a short sentinel
+            # "__CRIC_TABLE_READY__:<N>" instead of the full table to avoid
+            # macOS pipe-buffer truncation (8 KB limit).  The formatted table
+            # is fetched via a second bamboo_last_evidence(mode="table") call.
+            if out.startswith("__CRIC_TABLE_READY__:"):
+                out = await self._fetch_cric_table(out)
+
             self._replace_thinking(thinking, out)
 
             # Record the assistant reply and enforce the history cap.
@@ -1019,7 +1081,7 @@ class BambooTui(App):
             "  /plugin <id>          Switch plugin (affects banner tool name)\n"
             "  /debug on|off         Toggle debug (shows tool calls + raw results)\n"
             "  /fastpath on|off      Toggle deterministic fast-path routing (off → use LLM planner)\n"
-            "  /costs                Show estimated LLM token cost for the last request\n"
+            "  /costs                Show estimated LLM token cost for the last request + session total\n"
             "  /clear                Clear transcript, context memory, and HTTP cache\n"
             "  /exit, /quit          Exit the app\n"
             "\n"
@@ -1092,12 +1154,14 @@ class BambooTui(App):
         self._write_system(f"Fast-path routing {status}.")
 
     def _cmd_costs(self) -> None:
-        """Show estimated LLM token cost for the last request.
+        """Show estimated LLM token cost for the last request and session total.
 
         Reads ``input_tokens`` and ``output_tokens`` from every ``llm_call``
         span in ``_last_spans``, prices them using :data:`_MODEL_COST_PER_MTOK`,
-        and presents a per-call breakdown table plus a total.  Models not in
-        the pricing table fall back to the default rate and are flagged.
+        and presents a per-call breakdown table plus a request total.  A second
+        section shows the running session total accumulated across all completed
+        requests since the TUI was started.  Models not in the pricing table
+        fall back to the default rate and are flagged.
         """
         if not self._last_spans:
             self._write_system(
@@ -1144,12 +1208,24 @@ class BambooTui(App):
         table.add_section()
         total_cost = est["total_cost_usd"]
         table.add_row(
-            "[bold]TOTAL[/bold]",
+            "[bold]This request[/bold]",
             f"[bold]{est['total_input']:,}[/bold]",
             f"[bold]{est['total_output']:,}[/bold]",
             "",
             f"[bold green]${total_cost:.6f}[/bold green]",
         )
+
+        # Session total row — accumulated across all requests since startup.
+        if self._session_request_count > 0:
+            table.add_section()
+            req_word = "request" if self._session_request_count == 1 else "requests"
+            table.add_row(
+                f"[bold cyan]Session ({self._session_request_count} {req_word})[/bold cyan]",
+                f"[bold cyan]{self._session_input_tokens:,}[/bold cyan]",
+                f"[bold cyan]{self._session_output_tokens:,}[/bold cyan]",
+                "",
+                f"[bold cyan]${self._session_cost_usd:.6f}[/bold cyan]",
+            )
 
         note = ""
         if est["unknown_models"]:
@@ -1444,13 +1520,41 @@ class BambooTui(App):
         """
         self._write_panel(Text(msg), title=f"{_now()}  you", border_style="dim")
 
+    @staticmethod
+    def _is_preformatted(msg: str) -> bool:
+        """Return True when *msg* is a pre-formatted plain-text table, not Markdown.
+
+        Pre-formatted responses (e.g. the direct CRIC full-list table) must be
+        rendered with ``Text`` rather than ``Markdown`` to prevent Rich's paragraph
+        reflow from collapsing multi-line plain text into a single wrapped block.
+        A message is considered pre-formatted when its first line ends with ``":"``
+        and the second line starts with two spaces (the indented site column), which
+        is the signature layout produced by ``_format_cric_full_list``.
+
+        Args:
+            msg (str): Message text to inspect.
+
+        Returns:
+            True if the message should be rendered as pre-formatted text.
+        """
+        lines = msg.splitlines()
+        if len(lines) < 2:
+            return False
+        return lines[0].rstrip().endswith(":") and lines[1].startswith("  ")
+
     def _write_assistant(self, msg: str) -> None:
         """Write an assistant message.
 
+        Pre-formatted plain-text tables (e.g. the CRIC full-list output) are
+        rendered with ``Text`` to prevent Rich's Markdown renderer from
+        reflowing the table rows into a single paragraph.  All other responses
+        are rendered as ``Markdown``.
+
         Args:
-            msg (str): Markdown message text.
+            msg (str): Message text (Markdown or pre-formatted plain text).
         """
-        self._write_panel(Markdown(msg), title=f"{_now()}  AskPanDA", border_style="dim")
+        renderable = Text(msg) if self._is_preformatted(msg) else Markdown(msg)
+        self._write_panel(renderable, title=f"{_now()}  AskPanDA", border_style="dim")
 
     def _write_error(self, msg: str) -> None:
         """Write an error message.
@@ -1648,9 +1752,11 @@ def main() -> None:
         cfg = MCPServerConfig(transport="http", http_url=args.http_url, terminate_on_close=args.terminate_on_close)
     else:
         _trace_file = os.path.join(tempfile.gettempdir(), f"bamboo_trace_{os.getpid()}.jsonl")
+        _cric_table_file = os.path.join(tempfile.gettempdir(), f"bamboo_cric_table_{os.getpid()}.txt")
         _stdio_env = os.environ.copy()
         _stdio_env["BAMBOO_TRACE"] = "1"
         _stdio_env["BAMBOO_TRACE_FILE"] = _trace_file
+        _stdio_env["BAMBOO_CRIC_TABLE_FILE"] = _cric_table_file
         _stdio_env["BAMBOO_QUIET"] = "1"  # redirect server stderr → /dev/null
         cfg = MCPServerConfig(
             transport="stdio",
