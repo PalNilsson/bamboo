@@ -237,6 +237,44 @@ Entry point registration in `pyproject.toml`:
 "atlas.harvester_workers" = "askpanda_atlas.harvester_worker:panda_harvester_workers_tool"
 ```
 
+#### Harvester Timeseries (`harvester_timeseries_impl.py`)
+
+Fetches per-bucket pilot counts from the OpenSearch `atlas_harvesterworkers-*` index for a single status over a time window. Used exclusively by the TUI for rendering ASCII time-series charts — it is **not** routed through `bamboo_answer` and has no LLM synthesis prompt.
+
+Endpoint: OpenSearch `atlas_harvesterworkers-*` index via `date_histogram` aggregation on `@timestamp`.
+
+Public surface:
+- `compute_interval(from_dt, to_dt) -> str` — derives a `fixed_interval` string targeting ≈12–20 buckets: ≤30 min → `1m`, ≤3 h → `5m`, ≤12 h → `15m`, else `1h`.
+- `fetch_timeseries(status, from_dt, to_dt, site, interval) -> list[dict]` — synchronous; call via `asyncio.to_thread()`. Creates a fresh OpenSearch client per call, applies optional `computingSite.keyword` filter, caches results for 60 s via `_cache._set/_get`.
+- `PandaHarvesterTimeseriesTool` / `get_definition()` / `panda_harvester_timeseries_tool` singleton.
+
+Evidence structure (returned to the TUI, not sent to the LLM):
+- `status` — the status that was queried.
+- `interval` — the `fixed_interval` used (e.g. `"1m"`, `"5m"`).
+- `buckets` — list of `{"timestamp": str, "count": int}` dicts in ascending order.
+- `total_buckets`, `from_dt`, `to_dt`, `site_filter`, `endpoint`, `error`.
+
+Key design decisions:
+- **Display-only tool** — called directly from `_try_auto_chart()` in the TUI after a `panda_harvester_workers` answer; never appears in a `bamboo_answer` plan.
+- **Entry point name is the call name** — `core.py` overwrites `get_definition()["name"]` with the entry point key for plugin tools. The TUI must call it as `"atlas.harvester_timeseries"`, not `"panda_harvester_timeseries"`.
+- **OpenSearch auth** — the cluster at `os-atlas.cern.ch` requires Kerberos (SPNEGO). On lxplus a valid `kinit` ticket is sufficient. Local use requires CERN VPN; Basic auth (`ASKPANDA_OPENSEARCH` + `ASKPANDA_OPENSEARCH_USER`) works only if the network path accepts it.
+- **Cert verification** — set `ASKPANDA_OPENSEARCH_VERIFY_CERTS=false` to skip TLS verification when the CERN CA bundle is unavailable locally.
+
+Entry point registration in `pyproject.toml`:
+```toml
+"atlas.harvester_timeseries" = "askpanda_atlas.harvester_timeseries:panda_harvester_timeseries_tool"
+```
+
+#### Chart Utilities (`chart_utils.py`)
+
+Pure ASCII chart rendering for Harvester evidence. No I/O, no bamboo dependency — importable and testable independently.
+
+Public surface:
+- `ascii_status_bar(evidence, bar_width)` — horizontal bar chart of `nworkers_by_status`, sorted by count descending. Includes window label and grand total.
+- `ascii_pivot_table(evidence, top_n)` — fixed-width table of the top `top_n` rows from the `pivot` list, broken down by status × jobtype × resourcetype.
+- `ascii_timeseries(buckets, status, width, height)` — vertical bar chart with `@timestamp` buckets on the X-axis and worker count on the Y-axis. Y-axis shows min/max/mid tick labels. Adapted from `ascii_histogram` in `opensearch_monitor.py`.
+- `render_chart(evidence, width, mode)` — dispatcher. Modes: `"auto"` (status bar if `nworkers_by_status` present, else pivot), `"status"`, `"pivot"`, `"timeseries"`.
+
 #### Log Analysis (`log_analysis_impl.py`)
 
 - `_fetch_metadata` uses `cached_fetch_jsonish` (60 s TTL).
@@ -254,6 +292,7 @@ Entry point registration in `pyproject.toml`:
 | `/job <id>` | Shorthand: analyse failure of job `<id>` |
 | `/json` | Verbatim BigPanDA API response for last query (yellow panel) |
 | `/inspect` | Compact evidence dict for last query — what the LLM saw (cyan panel) |
+| `/chart` | Re-display the ASCII pilot chart for the last Harvester query (status bar + timeseries if available) |
 | `/tracing` | Timing and trace spans for last request |
 | `/history` | Conversation turns in context memory |
 | `/plugin <id>` | Switch active plugin |
@@ -287,6 +326,25 @@ Connected via stdio. Answer tool: bamboo_answer.
 The pricing table covers Mistral, Anthropic, OpenAI, and Google models. To add a new model, extend `_MODEL_COST_PER_MTOK` in `interfaces/textual/chat.py` — no restart needed as the dict is read at command time.
 
 **Important**: the planner (`bamboo_plan`) previously emitted no trace spans, so its token usage was invisible to `/costs`. It now emits an `llm_call` span with `tool="bamboo_plan"`, so `/fastpath off` queries correctly show two LLM call rows — the planning call and the synthesis call.
+
+#### Auto-Chart (`_try_auto_chart`)
+
+After every `bamboo_answer` response, `_try_auto_chart()` runs as a post-processing step. It makes up to two additional MCP calls:
+
+1. **`bamboo_last_evidence(mode="evidence")`** — retrieves the snapshot evidence. If `tool != "panda_harvester_workers"` or `len(nworkers_by_status) <= 1`, returns immediately.
+2. **`atlas.harvester_timeseries`** — fetches per-bucket counts for the status extracted from the user's question. Skipped if the tool is not registered (i.e. `opensearch-py`/`opensearch-dsl` not installed or `ASKPANDA_OPENSEARCH` not set).
+
+Two panels are written on success:
+- `pilot chart` (green) — `ascii_status_bar` from snapshot evidence.
+- `pilot timeseries (<status>)` (green) — `ascii_timeseries` from OpenSearch buckets.
+
+Client-side helpers (module-level in `chat.py`, no bamboo-core import):
+- `_extract_status_from_question(question)` — returns the first matching status from `_HARVESTER_STATUSES`; defaults to `"running"`.
+- `_extract_window_from_question(question)` — mirrors `bamboo_answer._extract_time_window_from_question`; returns `(from_dt, to_dt)` or `None`.
+
+All failures in `_try_auto_chart` are swallowed silently (`except Exception: pass`) so a chart error never disrupts the main answer.
+
+The `/chart` slash command manually re-triggers the same rendering from the stored evidence, useful after scrolling past the auto-rendered chart.
 
 ### PanDA MCP Integration (`packages/askpanda_atlas/`)
 
@@ -431,3 +489,8 @@ with patch("askpanda_atlas._cache.cached_fetch_jsonish",
 | `PANDA_MCP_USE_SSE` | `1`/`true`/`yes` to use the SSE transport; default is streamable-HTTP (correct for `aipanda120.cern.ch`) |
 | `PANDA_MCP_TLS_VERIFY` | Set to `0` or `false` to disable TLS certificate verification. **Development/testing only** — use when the CERN Grid CA is not in the local Python CA bundle (common outside CERN). On lxplus and CERN machines leave this unset. |
 | `PANDA_MCP_CA_BUNDLE` | Path to a PEM CA bundle to use instead of the system default, e.g. `/tmp/CERN-bundle.pem`. Use when the CERN Grid CA is available as a standalone file but not in the system store. |
+| `ASKPANDA_OPENSEARCH` | Password for OpenSearch HTTP Basic auth. Required for `panda_harvester_timeseries` (timeseries charts). |
+| `ASKPANDA_OPENSEARCH_HOST` | OpenSearch cluster URL (default: `https://os-atlas.cern.ch/os`). |
+| `ASKPANDA_OPENSEARCH_USER` | OpenSearch HTTP auth username (default: `pilot-monitor-agent`). |
+| `ASKPANDA_OPENSEARCH_CA` | Path to CA certificate bundle for TLS verification (default: `/etc/pki/tls/certs/CERN-bundle.pem`). |
+| `ASKPANDA_OPENSEARCH_VERIFY_CERTS` | Set to `false` to disable TLS certificate verification. Local development only — not needed on lxplus. |

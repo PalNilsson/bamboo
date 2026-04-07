@@ -215,6 +215,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | `atlas.doc_bm25` | `panda_doc_bm25` | BM25 keyword search over ATLAS documentation |
 | `atlas.jobs_query` | `panda_jobs_query` | Natural language → SQL against the ingestion DuckDB |
 | `atlas.harvester_workers` | `panda_harvester_workers` | Live Harvester pilot/worker counts |
+| `atlas.harvester_timeseries` | `panda_harvester_timeseries` | Per-bucket pilot counts from OpenSearch (timeseries charts) |
 | `atlas.panda_server_health` | `panda_server_health` | PanDA server liveness via PanDA MCP |
 | `atlas.cric_query` | `cric_query` | Natural language → SQL against the CRIC queuedata DuckDB |
 | `atlas.ui_manifest` | `atlas.ui_manifest` | TUI branding (banner, accent colour, display name) |
