@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -67,6 +68,31 @@ def _serialise_row(row: dict[str, Any]) -> dict[str, Any]:
         else:
             out[k] = v
     return out
+
+
+def _db_mtime(duckdb_path: str) -> str | None:
+    """Return the database file's last-modified time as a compact UTC string.
+
+    Used to populate ``db_last_modified`` in evidence dicts so the TUI can
+    display a "Database last updated" footnote without an extra SQL query.
+
+    Args:
+        duckdb_path: Filesystem path to the DuckDB file.
+
+    Returns:
+        ISO-style UTC timestamp string (e.g. ``"2026-04-07 10:31 UTC"``), or
+        ``None`` when the path is ``":memory:"``, empty, or the file is absent.
+    """
+    import datetime  # deferred — only called at query time
+    if not duckdb_path or duckdb_path == ":memory:":
+        return None
+    try:
+        mtime = os.path.getmtime(duckdb_path)
+        return datetime.datetime.fromtimestamp(
+            mtime, tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M UTC")
+    except OSError:
+        return None
 
 
 def _execute_query(
@@ -172,6 +198,160 @@ def _looks_like_cannot_answer(text: str) -> bool:
         "no sql", "i'm sorry",
     )
     return any(phrase in lower for phrase in refusal_phrases)
+
+
+# ---------------------------------------------------------------------------
+# List-all-queues fast path (no LLM, no SQL generation)
+# ---------------------------------------------------------------------------
+
+#: Signal phrases that indicate the user wants *all* queues without a site or
+#: status filter.  Matching is case-insensitive substring search.  Short,
+#: Regex that matches the core "list/show/get all queues" intent.
+#: Handles natural variations like "show me all the PanDA queues in CRIC",
+#: "list all queues", "all panda queues", "give me a list of all queues", etc.
+#: Trailing "in/from CRIC" or "in the CRIC database" are intentionally allowed
+#: because they name CRIC as the data source, not as a site filter.
+_LIST_ALL_RE: re.Pattern[str] = re.compile(
+    r"""
+    (?:
+        (?:list|show|get|give\s+me|display)
+        (?:\s+(?:me|us))?
+        (?:\s+a\s+list\s+of)?
+        \s+all
+        (?:\s+the)?
+        (?:\s+(?:panda|pandda|atlas))?
+        \s+queues
+    |
+        all
+        (?:\s+the)?
+        (?:\s+(?:panda|pandda|atlas))?
+        \s+queues
+    |
+        every\s+queue
+    |
+        (?:full|complete)\s+queue\s+list
+    )
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+#: Veto regex: if any of these patterns appear alongside a list-all signal,
+#: the question is scoped (site or status filter) and must go through the
+#: NL-to-SQL pipeline instead of the fast path.
+_LIST_ALL_VETO_RE: re.Pattern[str] = re.compile(
+    r"""
+    \b(?:
+        at\s+\S
+        | for\s+\S
+        | using\b
+        | with\b
+        | that\b
+        | where\b
+        | which\b
+        | \bonline\b
+        | \boffline\b
+        | \bbrokeroff\b
+    )
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+#: SQL executed by the list-all fast path.  Columns chosen to be informative
+#: yet compact; ordered by site then queue for human readability.
+_LIST_ALL_SQL: str = (
+    "SELECT queue, atlas_site, status, type "
+    "FROM queuedata "
+    "ORDER BY atlas_site, queue"
+)
+
+
+def _is_list_all_queues(question: str) -> bool:
+    """Return ``True`` when *question* is an unscoped request for all queues.
+
+    Detects a wide range of natural phrasings -- "list all queues",
+    "show me all the PanDA queues in CRIC", "all panda queues", etc. --
+    while vetoing scoped requests like "list all queues at BNL" or
+    "all online queues", which must flow through the NL-to-SQL pipeline.
+
+    The detection uses two compiled regexes rather than a fixed phrase list
+    so that natural word-order variations ("show me all the ...") are covered
+    without enumerating every possible phrasing.
+
+    Args:
+        question: Natural-language question from the user (already stripped).
+
+    Returns:
+        ``True`` if the question is an unscoped list-all request;
+        ``False`` otherwise.
+    """
+    if not _LIST_ALL_RE.search(question):
+        return False
+    return not bool(_LIST_ALL_VETO_RE.search(question))
+
+
+def list_all_queues(duckdb_path: str) -> dict[str, Any]:
+    """Return all queues in the CRIC database without LLM involvement.
+
+    Executes a fixed, pre-validated SELECT directly against the DuckDB file,
+    bypassing the LLM SQL-generation pipeline entirely.  This avoids the
+    ``MAX_ROWS=50`` fetch cap that applies to NL→SQL queries and ensures the
+    user always receives the full queue inventory.
+
+    The result structure mirrors the evidence dict produced by
+    :func:`fetch_and_analyse` so the Bamboo executor and synthesis prompt
+    work unchanged.
+
+    Args:
+        duckdb_path: Filesystem path to the DuckDB file, or ``\":memory:\"``
+            for tests.
+
+    Returns:
+        Evidence dictionary with keys: ``question``, ``sql``, ``columns``,
+        ``rows``, ``row_count``, ``truncated``, ``execution_time_ms``,
+        ``db_path``, ``error``, ``guard_rejection``, ``raw_payload``.
+    """
+    from askpanda_atlas.cric_query_schema import MAX_ROWS_FULL_LIST  # deferred
+
+    question = "List all PanDA queues in CRIC"
+
+    if duckdb_path != ":memory:" and not os.path.exists(duckdb_path):
+        logger.warning("list_all_queues: database file not found: %s", duckdb_path)
+        return _db_unavailable_evidence(question, duckdb_path)
+
+    try:
+        exec_result = _execute_query(
+            duckdb_path, _LIST_ALL_SQL, timeout_secs=10, max_rows=MAX_ROWS_FULL_LIST
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("list_all_queues: execution error: %s", exc)
+        return _execution_error_evidence(
+            question=question,
+            sql=_LIST_ALL_SQL,
+            duckdb_path=duckdb_path,
+            detail=str(exc),
+        )
+
+    logger.debug(
+        "list_all_queues: returned %d rows (truncated=%s) in %.1f ms",
+        exec_result["row_count"],
+        exec_result["truncated"],
+        exec_result["execution_time_ms"],
+    )
+
+    return {
+        "question": question,
+        "sql": _LIST_ALL_SQL,
+        "columns": exec_result["columns"],
+        "rows": exec_result["rows"],
+        "row_count": exec_result["row_count"],
+        "truncated": exec_result["truncated"],
+        "execution_time_ms": exec_result["execution_time_ms"],
+        "db_path": duckdb_path,
+        "db_last_modified": _db_mtime(duckdb_path),
+        "error": None,
+        "guard_rejection": None,
+        "raw_payload": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -676,6 +856,21 @@ class CricQueryTool:
 
         duckdb_path: str = os.environ.get("CRIC_DUCKDB_PATH", "cric.duckdb")
 
+        # Fast path: unscoped "list all queues" requests bypass the LLM entirely.
+        # The NL→SQL pipeline caps non-aggregation fetches at MAX_ROWS (50), which
+        # would truncate a full-inventory response.  list_all_queues() uses a
+        # fixed, pre-validated SQL with MAX_ROWS_FULL_LIST (2000) as the fetch cap.
+        if not site and _is_list_all_queues(question):
+            logger.debug("cric_query: list-all fast path triggered for %r", question)
+            try:
+                evidence = list_all_queues(duckdb_path)
+                return text_content(json.dumps({"evidence": evidence}))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("list_all_queues fast path failed")
+                return text_content(json.dumps({
+                    "evidence": {"question": question, "error": repr(exc)},
+                }))
+
         try:
             evidence = await fetch_and_analyse(question, duckdb_path)
             return text_content(json.dumps({"evidence": evidence}))
@@ -695,5 +890,7 @@ __all__ = [
     "CricQueryTool",
     "fetch_and_analyse",
     "get_definition",
+    "list_all_queues",
+    "_is_list_all_queues",
     "cric_query_tool",
 ]

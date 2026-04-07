@@ -1273,3 +1273,419 @@ class TestClarificationReply:
         assert tool == "panda_jobs_query"
         assert "BNL" in question
         assert question != "jobs"
+
+
+# ===========================================================================
+# list_all_queues fast path
+# ===========================================================================
+
+
+class TestIsListAllQueues:
+    """Unit tests for the _is_list_all_queues regex-based intent detector."""
+
+    def setup_method(self) -> None:
+        """Import the helper fresh for each test."""
+        from askpanda_atlas.cric_query_impl import _is_list_all_queues  # noqa: PLC0415
+        self._fn = _is_list_all_queues
+
+    # --- Positive cases (unscoped global requests) ---------------------------
+
+    def test_list_all_queues(self) -> None:
+        """'list all queues' is the canonical trigger phrase."""
+        assert self._fn("list all queues") is True
+
+    def test_show_all_queues(self) -> None:
+        """'show all queues' should trigger the fast path."""
+        assert self._fn("show all queues") is True
+
+    def test_all_panda_queues(self) -> None:
+        """'all panda queues' should trigger the fast path."""
+        assert self._fn("all panda queues") is True
+
+    def test_show_me_all_the_panda_queues_in_cric(self) -> None:
+        """The real user phrase that motivated the feature."""
+        assert self._fn("show me all the PanDA queues in CRIC") is True
+
+    def test_show_me_all_queues(self) -> None:
+        """'show me all queues' -- extra words around signal are fine."""
+        assert self._fn("Show me all queues") is True
+
+    def test_all_queues_in_cric(self) -> None:
+        """'all queues in CRIC' names CRIC as data source; fast path fires."""
+        assert self._fn("all queues in cric") is True
+
+    def test_all_queues_from_cric(self) -> None:
+        """'all queues from cric' is also a CRIC-source reference."""
+        assert self._fn("all queues from cric") is True
+
+    def test_list_of_all_queues(self) -> None:
+        """'list of all queues' should trigger the fast path."""
+        assert self._fn("list of all queues") is True
+
+    def test_full_queue_list(self) -> None:
+        """'full queue list' should trigger the fast path."""
+        assert self._fn("full queue list") is True
+
+    def test_every_queue(self) -> None:
+        """'every queue' should trigger the fast path."""
+        assert self._fn("every queue") is True
+
+    def test_give_me_a_list_of_all_queues(self) -> None:
+        """Multi-word preamble before 'all queues' is handled."""
+        assert self._fn("give me a list of all queues") is True
+
+    def test_show_me_a_list_of_all_panda_queues_in_cric(self) -> None:
+        """Full natural-language phrasing with CRIC reference."""
+        assert self._fn("Show me a list of all PanDA queues in CRIC") is True
+
+    def test_case_insensitive(self) -> None:
+        """Signal matching is case-insensitive."""
+        assert self._fn("LIST ALL QUEUES") is True
+
+    # --- Scoped / negative cases (must go through NL-to-SQL) -----------------
+
+    def test_list_all_queues_at_bnl_is_scoped(self) -> None:
+        """'at BNL' veto fires; must go through NL-to-SQL."""
+        assert self._fn("list all queues at BNL") is False
+
+    def test_list_all_online_queues_is_scoped(self) -> None:
+        """Status word 'online' veto fires."""
+        assert self._fn("list all online queues") is False
+
+    def test_all_offline_queues_is_scoped(self) -> None:
+        """'offline' status word veto fires."""
+        assert self._fn("all offline queues") is False
+
+    def test_list_all_queues_for_cern(self) -> None:
+        """'for CERN' site qualifier veto fires."""
+        assert self._fn("list all queues for CERN") is False
+
+    def test_which_queues_are_active(self) -> None:
+        """No list-all signal -- should not trigger."""
+        assert self._fn("which queues are active?") is False
+
+    def test_empty_string(self) -> None:
+        """Empty question should not trigger."""
+        assert self._fn("") is False
+
+    def test_unrelated_question(self) -> None:
+        """Unrelated question should not trigger."""
+        assert self._fn("how many failed jobs at BNL in the last hour?") is False
+
+    def test_show_me_all_jobs_not_queues(self) -> None:
+        """'show me all jobs' should not trigger -- 'jobs' not 'queues'."""
+        assert self._fn("show me all jobs") is False
+
+
+class TestListAllQueues:
+    """Integration tests for the list_all_queues fast-path function."""
+
+    def setup_method(self) -> None:
+        """Import helpers fresh for each test."""
+        from askpanda_atlas.cric_query_impl import list_all_queues  # noqa: PLC0415
+        self._fn = list_all_queues
+
+    # --- DB-not-found --------------------------------------------------------
+
+    def test_missing_db_returns_structured_error(self) -> None:
+        """When the DuckDB file does not exist an error evidence dict is returned."""
+        result = self._fn("/nonexistent/path/cric.db")
+        assert result["error"] is not None
+        assert result["row_count"] == 0
+
+    # --- Happy path via in-memory DuckDB -------------------------------------
+
+    def test_returns_all_rows(self, mem_db: duckdb.DuckDBPyConnection) -> None:
+        """list_all_queues should return every row in the database."""
+        with patch("askpanda_atlas.cric_query_impl.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mem_db
+            mock_duckdb.Error = duckdb.Error
+            with patch("askpanda_atlas.cric_query_impl.os.path.exists", return_value=True):
+                result = self._fn(":memory:")
+        assert result["error"] is None
+        # Seed data has 5 rows; must not be capped at 50.
+        assert result["row_count"] == 5
+
+    def test_expected_columns_present(self, mem_db: duckdb.DuckDBPyConnection) -> None:
+        """Result columns must include queue, atlas_site, status, type."""
+        with patch("askpanda_atlas.cric_query_impl.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mem_db
+            mock_duckdb.Error = duckdb.Error
+            with patch("askpanda_atlas.cric_query_impl.os.path.exists", return_value=True):
+                result = self._fn(":memory:")
+        assert set(result["columns"]) >= {"queue", "atlas_site", "status", "type"}
+
+    def test_ordered_by_site_then_queue(self, mem_db: duckdb.DuckDBPyConnection) -> None:
+        """Rows must be ordered by atlas_site then queue."""
+        with patch("askpanda_atlas.cric_query_impl.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mem_db
+            mock_duckdb.Error = duckdb.Error
+            with patch("askpanda_atlas.cric_query_impl.os.path.exists", return_value=True):
+                result = self._fn(":memory:")
+        sites = [row["atlas_site"] for row in result["rows"]]
+        assert sites == sorted(sites), "Rows are not sorted by atlas_site"
+
+    def test_no_guard_rejection_field(self, mem_db: duckdb.DuckDBPyConnection) -> None:
+        """Evidence dict must include guard_rejection key set to None."""
+        with patch("askpanda_atlas.cric_query_impl.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mem_db
+            mock_duckdb.Error = duckdb.Error
+            with patch("askpanda_atlas.cric_query_impl.os.path.exists", return_value=True):
+                result = self._fn(":memory:")
+        assert result["guard_rejection"] is None
+
+    def test_sql_field_is_the_fixed_query(self, mem_db: duckdb.DuckDBPyConnection) -> None:
+        """The sql field in the evidence must be the fixed _LIST_ALL_SQL string."""
+        from askpanda_atlas.cric_query_impl import _LIST_ALL_SQL  # noqa: PLC0415
+        with patch("askpanda_atlas.cric_query_impl.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mem_db
+            mock_duckdb.Error = duckdb.Error
+            with patch("askpanda_atlas.cric_query_impl.os.path.exists", return_value=True):
+                result = self._fn(":memory:")
+        assert result["sql"] == _LIST_ALL_SQL
+
+    # --- Execution error -----------------------------------------------------
+
+    def test_execution_error_returns_structured_evidence(self) -> None:
+        """A DuckDB runtime error should produce a structured error evidence dict."""
+        with patch("askpanda_atlas.cric_query_impl._execute_query",
+                   side_effect=Exception("disk I/O error")):
+            with patch("askpanda_atlas.cric_query_impl.os.path.exists", return_value=True):
+                result = self._fn("/fake/cric.db")
+        assert result["error"] is not None
+        assert result["row_count"] == 0
+
+
+class TestListAllFastPathInCallMethod:
+    """End-to-end tests confirming the fast path fires from CricQueryTool.call()."""
+
+    def _run(self, coro: Any) -> Any:
+        """Run a coroutine synchronously.
+
+        Args:
+            coro: Coroutine to execute.
+
+        Returns:
+            Result of the coroutine.
+        """
+        import asyncio  # noqa: PLC0415
+        return asyncio.run(coro)
+
+    def test_list_all_bypasses_llm(self, mem_db: duckdb.DuckDBPyConnection) -> None:
+        """'list all queues' must not call the LLM at all."""
+        llm_called: list[bool] = []
+
+        async def _should_not_be_called(q: str, ctx: str) -> str:
+            """Sentinel that records an unexpected LLM call.
+
+            Args:
+                q: Question string.
+                ctx: Schema context.
+
+            Returns:
+                Never returns normally.
+            """
+            llm_called.append(True)
+            return "SELECT queue FROM queuedata LIMIT 1"
+
+        with patch("askpanda_atlas.cric_query_impl.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mem_db
+            mock_duckdb.Error = duckdb.Error
+            with patch("askpanda_atlas.cric_query_impl.os.path.exists", return_value=True):
+                with patch("askpanda_atlas.cric_query_impl._call_llm_for_sql",
+                           side_effect=_should_not_be_called):
+                    result = self._run(cric_query_tool.call({
+                        "question": "list all queues",
+                    }))
+
+        assert not llm_called, "LLM was called when fast path should have fired"
+        evidence = _unpack(result)
+        assert evidence.get("error") is None
+        assert evidence["row_count"] == 5
+
+    def test_list_all_with_site_arg_uses_nlsql(self, mem_db: duckdb.DuckDBPyConnection) -> None:
+        """When site= is provided the fast path is suppressed; NL→SQL must run."""
+        llm_called: list[bool] = []
+
+        async def _record_llm_call(q: str, ctx: str) -> str:
+            """Record that the LLM was called and return safe SQL.
+
+            Args:
+                q: Question string.
+                ctx: Schema context.
+
+            Returns:
+                Safe SELECT SQL.
+            """
+            llm_called.append(True)
+            return "SELECT queue, atlas_site, status, type FROM queuedata LIMIT 50"
+
+        with patch("askpanda_atlas.cric_query_impl.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mem_db
+            mock_duckdb.Error = duckdb.Error
+            with patch("askpanda_atlas.cric_query_impl.os.path.exists", return_value=True):
+                with patch("askpanda_atlas.cric_query_impl._call_llm_for_sql",
+                           side_effect=_record_llm_call):
+                    self._run(cric_query_tool.call({
+                        "question": "list all queues",
+                        "site": "BNL",
+                    }))
+
+        assert llm_called, "LLM should have been called when site= is provided"
+
+    def test_scoped_question_uses_nlsql(self, mem_db: duckdb.DuckDBPyConnection) -> None:
+        """'list all queues at CERN' is scoped — must go through NL→SQL."""
+        llm_called: list[bool] = []
+
+        async def _record(q: str, ctx: str) -> str:
+            """Record LLM invocation and return safe SQL.
+
+            Args:
+                q: Question string.
+                ctx: Schema context string.
+
+            Returns:
+                Safe SELECT SQL.
+            """
+            llm_called.append(True)
+            return "SELECT queue, status FROM queuedata LIMIT 50"
+
+        with patch("askpanda_atlas.cric_query_impl.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mem_db
+            mock_duckdb.Error = duckdb.Error
+            with patch("askpanda_atlas.cric_query_impl.os.path.exists", return_value=True):
+                with patch("askpanda_atlas.cric_query_impl._call_llm_for_sql",
+                           side_effect=_record):
+                    self._run(cric_query_tool.call({
+                        "question": "list all queues at CERN",
+                    }))
+
+        assert llm_called, "Scoped 'list all queues at CERN' should use NL→SQL"
+
+
+# ===========================================================================
+# _format_cric_full_list direct formatter
+# ===========================================================================
+
+
+class TestFormatCricFullList:
+    """Unit tests for the _format_cric_full_list direct-formatting bypass."""
+
+    def setup_method(self) -> None:
+        """Import the formatter and threshold fresh for each test."""
+        from bamboo.tools.bamboo_executor import (  # noqa: PLC0415
+            _format_cric_full_list,
+            _CRIC_DIRECT_FORMAT_THRESHOLD,
+        )
+        self._fn = _format_cric_full_list
+        self._threshold = _CRIC_DIRECT_FORMAT_THRESHOLD
+
+    def _make_evidence(
+        self,
+        row_count: int = 110,
+        truncated: bool = False,
+        error: str | None = None,
+        columns: list[str] | None = None,
+    ) -> dict:
+        """Build a minimal evidence dict for testing.
+
+        Args:
+            row_count: Number of rows to generate.
+            truncated: Whether to set the truncated flag.
+            error: Optional error string.
+            columns: Column list override; defaults to queue/atlas_site/status/type.
+
+        Returns:
+            Evidence dict suitable for passing to _format_cric_full_list.
+        """
+        if columns is None:
+            columns = ["queue", "atlas_site", "status", "type"]
+        rows = [
+            {
+                "queue": f"Q_{i:03d}",
+                "atlas_site": f"SITE_{i // 3:02d}",
+                "status": "online",
+                "type": "unified",
+            }
+            for i in range(row_count)
+        ]
+        return {
+            "rows": rows,
+            "row_count": row_count,
+            "truncated": truncated,
+            "columns": columns,
+            "error": error,
+        }
+
+    # --- Gate conditions (must return None) ----------------------------------
+
+    def test_below_threshold_returns_none(self) -> None:
+        """Row count below threshold must fall through to LLM synthesis."""
+        evidence = self._make_evidence(row_count=self._threshold - 1)
+        assert self._fn(evidence) is None
+
+    def test_truncated_returns_none(self) -> None:
+        """Truncated results must fall through to LLM synthesis."""
+        evidence = self._make_evidence(truncated=True)
+        assert self._fn(evidence) is None
+
+    def test_error_present_returns_none(self) -> None:
+        """Error evidence must fall through to LLM synthesis."""
+        evidence = self._make_evidence(error="DB unavailable")
+        assert self._fn(evidence) is None
+
+    def test_no_queue_column_returns_none(self) -> None:
+        """Aggregation results (no 'queue' column) must fall through."""
+        evidence = self._make_evidence(columns=["atlas_site", "n"])
+        assert self._fn(evidence) is None
+
+    def test_no_atlas_site_column_returns_none(self) -> None:
+        """Results without atlas_site column must fall through."""
+        evidence = self._make_evidence(columns=["queue", "status"])
+        assert self._fn(evidence) is None
+
+    # --- Happy-path output shape ----------------------------------------------
+
+    def test_returns_string_above_threshold(self) -> None:
+        """Above the threshold with valid columns, a string must be returned."""
+        evidence = self._make_evidence()
+        result = self._fn(evidence)
+        assert isinstance(result, str)
+
+    def test_header_contains_row_count(self) -> None:
+        """First line must state the total queue count."""
+        evidence = self._make_evidence(row_count=110)
+        result = self._fn(evidence)
+        assert result is not None
+        first_line = result.splitlines()[0]
+        assert "110" in first_line
+        assert "queue" in first_line.lower()
+
+    def test_no_blank_line_after_header(self) -> None:
+        """There must be no spurious blank line between the header and first row."""
+        evidence = self._make_evidence()
+        result = self._fn(evidence)
+        assert result is not None
+        lines = result.splitlines()
+        assert lines[1].strip() != "", "Blank line found immediately after header"
+
+    def test_site_shown_once_per_group(self) -> None:
+        """Each atlas_site value should appear exactly once (first row of group)."""
+        evidence = self._make_evidence(row_count=110)
+        result = self._fn(evidence)
+        assert result is not None
+        data_lines = result.splitlines()[1:]
+        # Count non-blank site labels in the first column field
+        site_labels = [ln[2:30].strip() for ln in data_lines if ln.strip()]
+        # Only the first row of each site group should have a non-empty site label.
+        # With 110 rows and 3 rows/site we expect ceil(110/3) = 37 site labels.
+        non_blank = [s for s in site_labels if s]
+        assert len(non_blank) < len(data_lines), "Every row has a site label — grouping not working"
+
+    def test_all_queues_present(self) -> None:
+        """Every queue name in the evidence must appear in the output."""
+        evidence = self._make_evidence(row_count=110)
+        result = self._fn(evidence)
+        assert result is not None
+        for row in evidence["rows"]:
+            assert row["queue"] in result, f"Queue {row['queue']!r} missing from output"

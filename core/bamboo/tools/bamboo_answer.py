@@ -526,6 +526,16 @@ _CRIC_SIGNALS: frozenset[str] = frozenset({
     "corecount",
     "cpu slots",
     "brokeroff",
+    # Unambiguous list-all-queues phrasing — no status/site filter,
+    # clearly asking for the full queue inventory from CRIC.
+    "all queues",
+    "list all queues",
+    "show all queues",
+    "every queue",
+    "full queue list",
+    "complete queue list",
+    "give me all queues",
+    "get all queues",
     # Queue-state phrasing: "queue(s) <status>" or "<status> queue(s)"
     # These are always CRIC because CRIC is the queue catalogue.
     "queue online",

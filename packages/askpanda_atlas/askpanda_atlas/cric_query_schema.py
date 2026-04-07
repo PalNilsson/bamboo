@@ -56,6 +56,11 @@ MAX_ROWS: int = 50
 #: so the full result set is always small and must not be truncated.
 MAX_ROWS_AGGREGATION: int = 500
 
+#: Row cap for the dedicated ``list_all_queues`` fast path, which bypasses the
+#: NL→SQL pipeline entirely.  ATLAS has ~500 queues today; 2000 gives ample
+#: headroom without risking unbounded memory use.
+MAX_ROWS_FULL_LIST: int = 2000
+
 #: Hard timeout applied to every query execution (seconds).
 QUERY_TIMEOUT_SECS: int = 10
 

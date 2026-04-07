@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 from typing import Any
 
 from bamboo.llm.types import Message
@@ -40,6 +42,7 @@ from bamboo.tracing import EVENT_PLAN, EVENT_RETRIEVAL, EVENT_SYNTHESIS, span
 # ---------------------------------------------------------------------------
 
 _last_evidence_store: dict[str, Any] = {}
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Synthesis system prompt constants (moved from bamboo_answer.py)
@@ -167,6 +170,8 @@ _SYSTEM_JOBS_QUERY: str = (
     "- If row_count is 0, say no matching jobs were found.\n"
     "- If the error field contains a non-null string, explain the problem clearly.\n"
     "- Do not fabricate job counts or status values not present in the rows.\n"
+    "- Do not include any timestamp, freshness, or 'data as of' text — this is\n"
+    "  added automatically as a footnote after your response.\n"
     "- Be concise. For count questions, lead with the number.\n"
 )
 
@@ -176,29 +181,37 @@ _SYSTEM_CRIC_QUERY: str = (
     "You have queried the CRIC (Computing Resource Information Catalogue) "
     "database and received structured results about ATLAS computing queues.\n"
     "The evidence contains: the SQL query that was executed, the result rows, "
-    "row_count, last_modified (data freshness), and an error field "
-    "(null means success — do NOT treat null as an error).\n"
+    "row_count, and an error field (null means success — do NOT treat null as an error).\n"
     "Schema notes: table is 'queuedata'; USE 'status' column for filtering "
     "(online/offline/test/brokeroff) — 'state' is always 'ACTIVE' for all rows; "
     "site in 'atlas_site'; copytools/acopytools are JSON arrays.\n"
     "Rules:\n"
-    "- Answer directly and concisely from the rows and row_count in the evidence.\n"
+    "- Answer directly from the rows and row_count in the evidence.\n"
     "- If error is null and rows are present, give the answer confidently.\n"
     "- If row_count is 0: check if atlas_site used exact equality (= not ILIKE).\n"
     "  ATLAS site names include suffixes (BNL-ATLAS, CERN-PROD, not BNL/CERN).\n"
     "  Suggest asking 'what sites are available?' or rephrasing with partial match.\n"
     "- If row_count is 0 and SQL used ILIKE, say no matching queues were found.\n"
     "- If the error field contains a non-null string, quote it VERBATIM.\n"
+    "- FULL-LIST RULE: If the question asks to list/show ALL queues (no site or status filter)\n"
+    "  AND truncated is false, you MUST enumerate EVERY queue in the rows — do NOT summarise,\n"
+    "  do NOT say 'truncated', do NOT show only examples. Render all rows as a table with\n"
+    "  columns: Site, Queue, Status, Type. Group consecutive rows by site (omit repeated site\n"
+    "  name). State the total count (row_count) as a header line, e.g. '230 queues total:'.\n"
+    "  Do NOT include any timestamp or 'data as of' text in the header — freshness\n"
+    "  is shown separately as a footnote.\n"
     "- If rows contain GROUP BY aggregation columns (e.g. atlas_site + count), "
     "present as a site-count table and state the total across all groups.\n"
-    "- If rows contain individual queue names, present them grouped by site.\n"
+    "- If rows contain individual queue names for a SCOPED query (site or status filter),\n"
+    "  present them grouped by site.\n"
     "- If truncated is true, note the result was capped and suggest filtering "
     "by atlas_site (e.g. 'Which queues at BNL are not online?') to get a "
     "complete list for a specific location.\n"
     "- Highlight queue status (online/offline/test/brokeroff) prominently.\n"
-    "- Always note the last_modified timestamp when available in the rows.\n"
     "- Do not fabricate queue names, statuses, or resource values not in the rows.\n"
-    "- Be concise. For count questions, lead with the number.\n"
+    "- Do not include any timestamp, freshness, or 'data as of' text — this is\n"
+    "  added automatically as a footnote after your response.\n"
+    "- For count questions, lead with the number.\n"
 )
 
 _SYSTEM_HARVESTER_WORKERS: str = (
@@ -641,6 +654,229 @@ def _build_synthesis_prompt(
     return system, user
 
 
+# ---------------------------------------------------------------------------
+# Direct formatting bypass for large CRIC full-list results
+# ---------------------------------------------------------------------------
+
+#: Minimum row count above which the CRIC full-list formatter is used instead
+#: of LLM synthesis.  Below this threshold (e.g. a site-scoped query returning
+#: a handful of queues) the LLM synthesises normally.
+_CRIC_DIRECT_FORMAT_THRESHOLD: int = 100
+
+
+def _format_cric_full_list(evidence: dict[str, Any]) -> str | None:
+    """Format a full CRIC queue-list result directly, bypassing LLM synthesis.
+
+    Called when ``cric_query`` returns a large, non-truncated set of individual
+    queue rows.  Renders a plain-text table grouped by site, which is both
+    lossless (no token-budget truncation) and faster than LLM synthesis.
+
+    Returns ``None`` when the evidence does not meet the criteria for direct
+    formatting (wrong shape, aggregation result, error present, etc.) so the
+    caller falls through to normal LLM synthesis.
+
+    Args:
+        evidence: Unpacked evidence dict from ``cric_query``.
+
+    Returns:
+        Formatted plain-text string, or ``None`` to fall back to LLM synthesis.
+    """
+    # Only bypass for successful, non-truncated, non-aggregation results.
+    if evidence.get("error"):
+        return None
+    rows: list[dict[str, Any]] = evidence.get("rows", [])
+    row_count: int = evidence.get("row_count", 0)
+    truncated: bool = evidence.get("truncated", False)
+    columns: list[str] = evidence.get("columns", [])
+
+    if truncated or row_count < _CRIC_DIRECT_FORMAT_THRESHOLD:
+        return None
+
+    # Aggregation results have no "queue" column — let the LLM handle those.
+    if "queue" not in columns or "atlas_site" not in columns:
+        return None
+
+    # Build the table grouped by site.
+    lines: list[str] = [f"{row_count} PanDA queues in CRIC:"]
+    col_queue = "queue"
+    col_site = "atlas_site"
+    col_status = "status"
+    col_type = "type"
+
+    prev_site = ""
+    for row in rows:
+        site = str(row.get(col_site, ""))
+        queue = str(row.get(col_queue, ""))
+        status = str(row.get(col_status, ""))
+        qtype = str(row.get(col_type, ""))
+        site_label = site if site != prev_site else ""
+        prev_site = site
+        lines.append(f"  {site_label:<28}{queue:<32}{status:<12}{qtype}")
+
+    return "\n".join(lines)
+
+
+def _looks_like_fetch_cap_truncation(evidence: dict[str, Any]) -> bool:
+    """Return True when cric_query evidence looks like a silently-truncated fetch.
+
+    The NL-to-SQL pipeline uses ``fetchmany(MAX_ROWS + 1)`` where ``MAX_ROWS=50``.
+    When the DB has more rows than that cap, ``truncated`` is set to ``True`` by
+    :func:`_execute_query`.  However if the LLM-generated SQL already contained
+    ``LIMIT 50`` (matching the cap exactly), ``truncated`` is ``False`` even though
+    the full result set may be much larger.
+
+    This heuristic detects that case: row_count equals exactly 50 (the cap), the
+    result has individual queue columns (not an aggregation), and no error occurred.
+    When true, the caller should re-query via ``list_all_queues`` to recover the
+    full set before attempting direct formatting.
+
+    Args:
+        evidence: Evidence dict from ``_last_evidence_store["cric_query"]``.
+
+    Returns:
+        True when the evidence looks like a fetch-cap truncation.
+    """
+    from askpanda_atlas.cric_query_schema import MAX_ROWS  # deferred
+    if evidence.get("error"):
+        return False
+    if evidence.get("truncated"):
+        return False  # normal truncation — already flagged
+    row_count = evidence.get("row_count", 0)
+    if row_count != MAX_ROWS:
+        return False
+    columns = evidence.get("columns", [])
+    return "queue" in columns and "atlas_site" in columns
+
+
+def _try_cric_direct_format() -> str | None:
+    """Attempt the CRIC full-list direct-format bypass.
+
+    Reads the most recent ``cric_query`` evidence from ``_last_evidence_store``
+    and tries two strategies:
+
+    1. **Normal path**: :func:`_format_cric_full_list` qualifies the evidence
+       (≥100 rows, not truncated, has queue+site columns) and formats it.
+    2. **Fetch-cap recovery**: if the NL→SQL pipeline ran instead of the
+       ``list_all_queues`` fast path (e.g. old deployed code), the evidence may
+       have exactly ``MAX_ROWS=50`` rows and ``truncated=False`` — the Python
+       ``fetchmany`` cap silently truncated without setting the flag.  When
+       detected, ``list_all_queues`` is called directly to get the full set.
+
+    The result is stored in two places so the TUI can retrieve it without going
+    through the MCP pipe (bypasses the macOS 8 KB pipe-buffer limit).
+
+    Returns:
+        A short sentinel string ``"__CRIC_TABLE_READY__:<row_count>"`` when the
+        direct-format path fires, or ``None`` to fall through to LLM synthesis.
+    """
+    _stored = _last_evidence_store.get("cric_query", {})
+    # unpack_tool_result stores {"evidence": {...}} — unwrap if needed
+    cric_evidence = _stored.get("evidence", _stored)
+
+    # Strategy 1: normal path — evidence already has full row set.
+    direct = _format_cric_full_list(cric_evidence)
+
+    # Strategy 2: fetch-cap recovery.  If row_count == 50 and truncated is False
+    # and the result has individual queue rows (not aggregation), the NL→SQL
+    # pipeline ran with the default MAX_ROWS fetch cap and silently truncated.
+    # Call list_all_queues directly to get the real full set.
+    if direct is None and _looks_like_fetch_cap_truncation(cric_evidence):
+        db_path = cric_evidence.get("db_path", "")
+        try:
+            from askpanda_atlas.cric_query_impl import list_all_queues  # deferred
+            recovered = list_all_queues(db_path)
+            if not recovered.get("error"):
+                _last_evidence_store["cric_query"] = recovered
+                cric_evidence = recovered
+                direct = _format_cric_full_list(cric_evidence)
+        except Exception:  # noqa: BLE001
+            pass
+
+    if direct is None:
+        return None
+
+    footnote = _db_footnote(["cric_query"])
+    table_with_footnote = direct + footnote
+
+    _last_evidence_store["_cric_direct_table"] = table_with_footnote
+
+    cric_table_file = os.environ.get("BAMBOO_CRIC_TABLE_FILE")
+    if cric_table_file:
+        try:
+            with open(cric_table_file, "w", encoding="utf-8") as _fh:
+                _fh.write(table_with_footnote)
+        except OSError:
+            logger.warning("cric_query: failed to write table to %s", cric_table_file)
+
+    row_count = cric_evidence.get("row_count", 0)
+    return f"__CRIC_TABLE_READY__:{row_count}"
+
+
+async def _execute_one_tool(
+    tc: Any,
+    called_tool_names: list[str],
+    evidence_parts: list[str],
+    errors: list[str],
+) -> None:
+    """Call a single tool from a plan and accumulate evidence or errors.
+
+    Validates arguments, calls the tool, unpacks JSON evidence into
+    ``_last_evidence_store``, and appends a compact evidence string to
+    *evidence_parts*.  All failures are non-fatal — errors are appended to
+    *errors* so the caller can attempt synthesis with partial evidence.
+
+    Args:
+        tc: Tool call descriptor with ``tool``, ``namespace``, and ``arguments``.
+        called_tool_names: Mutable list of successfully-called tool names.
+        evidence_parts: Mutable list of compact evidence strings for synthesis.
+        errors: Mutable list of error strings accumulated across all tool calls.
+    """
+    from bamboo.core import TOOLS  # pylint: disable=import-outside-toplevel
+    from bamboo.core import _validate_arguments  # pylint: disable=import-outside-toplevel
+
+    tool_name: str = tc.tool
+    args: dict[str, Any] = dict(tc.arguments)
+
+    tool_obj = _resolve_tool(tool_name, tc.namespace, TOOLS)
+    if tool_obj is None:
+        errors.append(f"Unknown tool: {tool_name}")
+        return
+
+    get_def_fn = getattr(tool_obj, "get_definition", None)
+    if callable(get_def_fn):
+        try:
+            tool_def: dict[str, Any] = get_def_fn()  # type: ignore[assignment]
+        except Exception:  # pylint: disable=broad-exception-caught
+            tool_def = {}
+        err = _validate_arguments(tool_def, args)
+        if err:
+            errors.append(f"Invalid args for {tool_name}: {err}")
+            return
+
+    try:
+        raw_result: list[MCPContent] = await tool_obj.call(args)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        errors.append(f"Tool {tool_name} raised: {exc!s}")
+        return
+
+    called_tool_names.append(tool_name)
+
+    unpacked = unpack_tool_result(raw_result)
+    if unpacked:
+        _STORE_STRIP = {"pandaid_list"}
+        _last_evidence_store[tool_name] = {
+            k: v for k, v in unpacked.items() if k not in _STORE_STRIP
+        }
+        _last_evidence_store["last_tool"] = tool_name
+        _LLM_STRIP = {"raw_payload", "pandaid_list"}
+        llm_evidence = {k: v for k, v in unpacked.items() if k not in _LLM_STRIP}
+        evidence_parts.append(f"[{tool_name}]\n{_compact_json(llm_evidence)}")
+    else:
+        raw_text = raw_result[0].get("text", "") if raw_result else ""
+        if raw_text:
+            evidence_parts.append(f"[{tool_name}]\n{raw_text}")
+
+
 async def execute_plan(
     plan: Plan,
     question: str,
@@ -670,10 +906,6 @@ async def execute_plan(
     Returns:
         One-element ``list[MCPContent]`` with the synthesised text answer.
     """
-    # Lazy import to avoid circular dependency at module load time.
-    from bamboo.core import TOOLS  # pylint: disable=import-outside-toplevel
-    from bamboo.core import _validate_arguments  # pylint: disable=import-outside-toplevel
-
     evidence_parts: list[str] = []
     called_tool_names: list[str] = []
     errors: list[str] = []
@@ -682,57 +914,23 @@ async def execute_plan(
         pass  # Emit the plan as a trace event so the TUI /plan command can find it.
 
     for tc in plan.tool_calls:
-        tool_name: str = tc.tool
-        args: dict[str, Any] = dict(tc.arguments)
-
-        tool_obj = _resolve_tool(tool_name, tc.namespace, TOOLS)
-        if tool_obj is None:
-            errors.append(f"Unknown tool: {tool_name}")
-            continue
-
-        # Validate arguments against the tool schema.
-        get_def_fn = getattr(tool_obj, "get_definition", None)
-        if callable(get_def_fn):
-            try:
-                tool_def: dict[str, Any] = get_def_fn()  # type: ignore[assignment]
-            except Exception:  # pylint: disable=broad-exception-caught
-                tool_def = {}
-            err = _validate_arguments(tool_def, args)
-            if err:
-                errors.append(f"Invalid args for {tool_name}: {err}")
-                continue
-
-        # Call the tool, catching any exceptions so one failure is non-fatal.
-        try:
-            raw_result: list[MCPContent] = await tool_obj.call(args)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            errors.append(f"Tool {tool_name} raised: {exc!s}")
-            continue
-
-        called_tool_names.append(tool_name)
-
-        # Unpack JSON evidence; fall back to raw text if unpacking yields nothing.
-        unpacked = unpack_tool_result(raw_result)
-        if unpacked:
-            # Store evidence for /inspect and /json — strip pandaid_list (can be
-            # 50k entries) to prevent /inspect timeouts. raw_payload kept for /json.
-            _STORE_STRIP = {"pandaid_list"}
-            _last_evidence_store[tool_name] = {
-                k: v for k, v in unpacked.items() if k not in _STORE_STRIP
-            }
-            _last_evidence_store["last_tool"] = tool_name
-            # Strip raw_payload and pandaid_list from LLM synthesis input.
-            _LLM_STRIP = {"raw_payload", "pandaid_list"}
-            llm_evidence = {k: v for k, v in unpacked.items() if k not in _LLM_STRIP}
-            evidence_parts.append(f"[{tool_name}]\n{_compact_json(llm_evidence)}")
-        else:
-            raw_text = raw_result[0].get("text", "") if raw_result else ""
-            if raw_text:
-                evidence_parts.append(f"[{tool_name}]\n{raw_text}")
+        await _execute_one_tool(
+            tc, called_tool_names, evidence_parts, errors
+        )
 
     if not called_tool_names:
         error_summary = "; ".join(errors) if errors else "No tool calls in plan."
         return text_content(f"All tool calls failed: {error_summary}")
+
+    # Direct-format bypass: for large CRIC full-list results, skip LLM synthesis.
+    # Returns a short sentinel; the table is written to a temp file for the TUI.
+    if called_tool_names == ["cric_query"]:
+        sentinel = _try_cric_direct_format()
+        if sentinel is not None:
+            async with span(EVENT_SYNTHESIS, tool="bamboo_executor",
+                            tools=called_tool_names, route=plan.route.value):
+                pass  # emit span for tracing consistency
+            return text_content(sentinel)
 
     system, user = _build_synthesis_prompt(
         called_tool_names, evidence_parts, question, errors,
@@ -741,12 +939,62 @@ async def execute_plan(
 
     async with span(EVENT_SYNTHESIS, tool="bamboo_executor",
                     tools=called_tool_names, route=plan.route.value):
-        # Cap tokens at 600 for follow-up expansions to keep latency under
-        # 10s at typical provider throughput; use full 2048 otherwise.
-        synthesis_max_tokens = 600 if original_question is not None else 2048
+        # Cap tokens at 600 for follow-up expansions; use 2048 normally.
+        # For cric_query returning many individual-queue rows (direct-format
+        # path missed), raise to 8192 so the LLM fallback does not truncate.
+        if original_question is not None:
+            synthesis_max_tokens = 600
+        elif _is_large_cric_result(called_tool_names):
+            synthesis_max_tokens = 8192
+        else:
+            synthesis_max_tokens = 2048
         body = await call_llm(system, user, history, max_tokens=synthesis_max_tokens)
 
-    return text_content(body)
+    return text_content(body + _db_footnote(called_tool_names))
+
+
+def _is_large_cric_result(tool_names: list[str]) -> bool:
+    """Return True when the last cric_query returned a large individual-queue result set.
+
+    Used to raise the LLM synthesis token budget when the direct-format bypass
+    did not fire (e.g. old deployed code) and the LLM must enumerate many rows.
+
+    Args:
+        tool_names: Names of the tools called in this plan execution.
+
+    Returns:
+        True when cric_query ran and returned >= threshold individual queue rows.
+    """
+    if "cric_query" not in tool_names:
+        return False
+    _stored = _last_evidence_store.get("cric_query", {})
+    ev = _stored.get("evidence", _stored)
+    if ev.get("row_count", 0) < _CRIC_DIRECT_FORMAT_THRESHOLD:
+        return False
+    return "queue" in ev.get("columns", [])
+
+
+def _db_footnote(tool_names: list[str]) -> str:
+    """Return a "Database last updated" footnote for DB-backed tool responses.
+
+    Reads ``db_last_modified`` from ``_last_evidence_store`` for each tool in
+    *tool_names* and returns a formatted footnote line.  Returns an empty string
+    when no timestamp is available (errors, in-memory test DBs, non-DB tools).
+
+    Args:
+        tool_names: Names of the tools whose evidence to inspect.
+
+    Returns:
+        Footnote string like ``"\n\nDatabase last updated: 2026-04-07 10:31 UTC"``,
+        or an empty string when no timestamp is found.
+    """
+    for name in tool_names:
+        _stored = _last_evidence_store.get(name, {})
+        evidence = _stored.get("evidence", _stored)
+        ts = evidence.get("db_last_modified")
+        if ts:
+            return f"\n\nDatabase last updated: {ts}"
+    return ""
 
 
 def _compact_json(obj: Any, limit: int = 12000) -> str:
@@ -782,6 +1030,8 @@ __all__ = [
     "_SYSTEM_GENERIC",
     "_SYSTEM_JOBS_QUERY",
     "_SYSTEM_CRIC_QUERY",
+    "_format_cric_full_list",
+    "_CRIC_DIRECT_FORMAT_THRESHOLD",
     "_SYSTEM_HARVESTER_WORKERS",
     "_SYSTEM_SITE_HEALTH",
     "_SYSTEM_PANDA_HEALTH",
@@ -829,10 +1079,11 @@ class BambooLastEvidenceTool:
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "enum": ["evidence", "raw"],
+                        "enum": ["evidence", "raw", "table"],
                         "description": (
                             "'evidence' returns the compact LLM-facing evidence dict; "
-                            "'raw' returns the verbatim BigPanDA API payload."
+                            "'raw' returns the verbatim BigPanDA API payload; "
+                            "'table' returns the pre-formatted CRIC full-list table text."
                         ),
                     },
                     "tool": {
@@ -875,6 +1126,17 @@ class BambooLastEvidenceTool:
                 "error": f"No evidence stored for tool {tool_name!r}.",
                 "available_tools": [k for k in _last_evidence_store if k != "last_tool"],
             }))
+
+        if mode == "table":
+            # Return the pre-formatted CRIC full-list table stored by the
+            # direct-format bypass in execute_plan.  The table is keyed
+            # separately so it survives independent of which tool ran last.
+            table_text = _last_evidence_store.get("_cric_direct_table")
+            if not table_text:
+                return text_content(json.dumps({
+                    "error": "No CRIC table available — ask to list all queues first.",
+                }))
+            return text_content(json.dumps({"table": table_text}))
 
         if mode == "raw":
             payload = evidence.get("raw_payload")
