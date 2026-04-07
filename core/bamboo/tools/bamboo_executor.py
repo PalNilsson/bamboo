@@ -975,7 +975,7 @@ def _is_large_cric_result(tool_names: list[str]) -> bool:
 
 
 def _db_footnote(tool_names: list[str]) -> str:
-    """Return a "Database last updated" footnote for DB-backed tool responses.
+    r"""Return a "Database last updated" footnote for DB-backed tool responses.
 
     Reads ``db_last_modified`` from ``_last_evidence_store`` for each tool in
     *tool_names* and returns a formatted footnote line.  Returns an empty string

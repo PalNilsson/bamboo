@@ -290,11 +290,11 @@ def _is_list_all_queues(question: str) -> bool:
 
 
 def list_all_queues(duckdb_path: str) -> dict[str, Any]:
-    """Return all queues in the CRIC database without LLM involvement.
+    r"""Return all queues in the CRIC database without LLM involvement.
 
     Executes a fixed, pre-validated SELECT directly against the DuckDB file,
     bypassing the LLM SQL-generation pipeline entirely.  This avoids the
-    ``MAX_ROWS=50`` fetch cap that applies to NL→SQL queries and ensures the
+    ``MAX_ROWS=50`` fetch cap that applies to NL->SQL queries and ensures the
     user always receives the full queue inventory.
 
     The result structure mirrors the evidence dict produced by
@@ -302,7 +302,7 @@ def list_all_queues(duckdb_path: str) -> dict[str, Any]:
     work unchanged.
 
     Args:
-        duckdb_path: Filesystem path to the DuckDB file, or ``\":memory:\"``
+        duckdb_path: Filesystem path to the DuckDB file, or ``:memory:``
             for tests.
 
     Returns:
