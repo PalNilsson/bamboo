@@ -188,6 +188,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | [`docs/plugins.md`](docs/plugins.md) | Writing and registering plugins |
 | [`docs/jobs-database.md`](docs/jobs-database.md) | Live PanDA jobs DB queries — schema, examples, guard rules, routing |
 | [`docs/cric-database.md`](docs/cric-database.md) | CRIC queuedata queries — schema, examples, guard rules, routing, disambiguation |
+| [`docs/harvester-workers.md`](docs/harvester-workers.md) | Harvester pilot/worker counts — API, evidence structure, routing, time windows |
 | [`docs/rag.md`](docs/rag.md) | RAG pipeline (ChromaDB + BM25) |
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
@@ -214,6 +215,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | `atlas.doc_bm25` | `panda_doc_bm25` | BM25 keyword search over ATLAS documentation |
 | `atlas.jobs_query` | `panda_jobs_query` | Natural language → SQL against the ingestion DuckDB |
 | `atlas.harvester_workers` | `panda_harvester_workers` | Live Harvester pilot/worker counts |
+| `atlas.harvester_timeseries` | `panda_harvester_timeseries` | Per-bucket pilot counts from OpenSearch (timeseries charts) |
 | `atlas.panda_server_health` | `panda_server_health` | PanDA server liveness via PanDA MCP |
 | `atlas.cric_query` | `cric_query` | Natural language → SQL against the CRIC queuedata DuckDB |
 | `atlas.ui_manifest` | `atlas.ui_manifest` | TUI branding (banner, accent colour, display name) |

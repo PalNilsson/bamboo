@@ -76,6 +76,94 @@ FALLBACK_BANNER = r"""
 """.strip("\n").splitlines()
 
 
+# ---------------------------------------------------------------------------
+# Question-parsing helpers for auto-chart (client-side, no bamboo-core import)
+# ---------------------------------------------------------------------------
+
+#: Harvester worker statuses recognised in user questions.
+_HARVESTER_STATUSES: tuple[str, ...] = (
+    "running", "submitted", "finished", "failed", "cancelled", "missed", "idle",
+)
+
+
+def _extract_status_from_question(question: str) -> str:
+    """Extract a Harvester worker status from a user question.
+
+    Scans for the first occurrence of a known status word.  Returns
+    ``"running"`` as the default when no status word is found, since
+    that is the most operationally relevant status for charts.
+
+    Args:
+        question: Raw user question text.
+
+    Returns:
+        Lowercase status string, e.g. ``"running"``, ``"failed"``.
+    """
+    q = question.lower()
+    for status in _HARVESTER_STATUSES:
+        if status in q:
+            return status
+    return "running"
+
+
+def _extract_window_from_question(
+    question: str,
+) -> tuple[str, str] | None:
+    """Extract a time window from a user question (client-side mirror).
+
+    Duplicates the core logic of
+    ``bamboo_answer._extract_time_window_from_question`` so the TUI does
+    not need to import server-side modules.
+
+    Recognised patterns (case-insensitive):
+    - ``"last/past N hours/minutes/days"``
+    - ``"yesterday"`` / ``"since yesterday"``
+    - ``"today"``
+
+    Args:
+        question: Raw user question text.
+
+    Returns:
+        ``(from_dt, to_dt)`` ISO-8601 strings (UTC, no timezone suffix),
+        or ``None`` when no temporal expression is found.
+    """
+    import re as _re
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+
+    q = question.lower()
+    now = _dt.now(tz=_tz.utc).replace(microsecond=0)
+
+    def _fmt(d: _dt) -> str:
+        return d.strftime("%Y-%m-%dT%H:%M:%S")
+
+    m = _re.search(
+        r"(?:last|past|in\s+the\s+last|in\s+the\s+past)\s+(\d+)\s+"
+        r"(hour|hours|hr|hrs|minute|minutes|min|mins|day|days)",
+        q,
+    )
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith("min"):
+            delta = _td(minutes=n)
+        elif unit.startswith("day"):
+            delta = _td(days=n)
+        else:
+            delta = _td(hours=n)
+        return _fmt(now - delta), _fmt(now)
+
+    if _re.search(r"\b(?:since\s+)?yesterday\b", q):
+        midnight = now.replace(hour=0, minute=0, second=0)
+        return _fmt(midnight - _td(days=1)), _fmt(now)
+
+    if _re.search(r"\b(?:since\s+)?today\b", q):
+        return _fmt(now.replace(hour=0, minute=0, second=0)), _fmt(now)
+
+    return None
+
+
 def _now() -> str:
     """Return a short local timestamp for transcript headers.
 
@@ -347,7 +435,8 @@ class BambooTui(App):
     }
 
     #banner {
-        height: auto;
+        height: 9;
+        min-height: 9;
         padding: 1 2;
     }
 
@@ -971,6 +1060,10 @@ class BambooTui(App):
             self._history.append({"role": "assistant", "content": out})
             self._cap_history()
 
+            # Auto-chart: silently append a pilot chart when the response
+            # came from panda_harvester_workers and has multiple statuses.
+            await self._try_auto_chart()
+
         except Exception as exc:
             self._replace_thinking(thinking, None)
             self._write_error(str(exc))
@@ -1047,6 +1140,9 @@ class BambooTui(App):
         if cmd == "/inspect":
             await self._handle_inspect_command()
             return
+        if cmd == "/chart":
+            await self._handle_chart_command()
+            return
             self._handle_history_command()
             return
         if cmd == "/plugin":
@@ -1076,6 +1172,7 @@ class BambooTui(App):
             "  /job <id>              Shorthand for: analyse failure of job <id>\n"
             "  /json                 Show verbatim BigPanDA API response (raw server JSON)\n"
             "  /inspect              Show structured evidence dict (job counts, sites, errors)\n"
+            "  /chart                Show ASCII bar chart of Harvester pilot counts by status\n"
             "  /tracing              Show timing + trace spans for last request\n"
             "  /history              Show turns currently held in context memory\n"
             "  /plugin <id>          Switch plugin (affects banner tool name)\n"
@@ -1650,6 +1747,201 @@ class BambooTui(App):
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self._write_error(f"Could not fetch evidence: {exc}")
+
+    def _chart_width(self) -> int:
+        """Return a usable character width for ASCII chart content.
+
+        Reads the transcript widget width and subtracts space for the
+        Panel border (2), padding (2), and the y-axis label area (8),
+        leaving the remainder for the bar/column content.  Falls back
+        to 80 when the transcript size is not yet available.
+
+        Returns:
+            Integer character width for the chart bar area, at least 20.
+        """
+        try:
+            w = self.transcript.size.width
+        except Exception:  # pylint: disable=broad-exception-caught
+            try:
+                w = self.size.width
+            except Exception:  # pylint: disable=broad-exception-caught
+                w = 80
+        # 2 panel border + 2 panel padding + 8 y-axis labels + 2 safety margin
+        return max(20, w - 14)
+
+    async def _try_auto_chart(self) -> None:
+        """Silently append an ASCII pilot chart after a Harvester answer.
+
+        Called automatically at the end of :meth:`_handle_question`.  Fetches
+        the latest evidence from the server store and renders a status bar
+        chart only when both conditions are met:
+
+        1. The last tool that ran was ``panda_harvester_workers``.
+        2. ``nworkers_by_status`` contains more than one entry (a single-status
+           result — e.g. a site-filtered snapshot that only saw ``running``
+           workers — is not worth charting).
+
+        All failures are swallowed silently so a chart rendering problem never
+        disrupts the main answer display.
+        """
+        if not self._mcp_ready:
+            return
+        try:
+            from askpanda_atlas.chart_utils import render_chart  # deferred — optional dep
+        except ImportError:
+            return
+        try:
+            res = await asyncio.wait_for(
+                self._to_thread(
+                    self.mcp.call_tool,
+                    "bamboo_last_evidence",
+                    {"mode": "evidence"},
+                ),
+                timeout=15,
+            )
+            text = _extract_text(res)
+            if not text:
+                return
+            parsed = json.loads(text)
+            # Structure: {"tool": "...", "mode": "...", "evidence": {"evidence": {...}}}
+            tool = parsed.get("tool", "")
+            if tool != "panda_harvester_workers":
+                return
+            snapshot_ev = (parsed.get("evidence") or {}).get("evidence") or {}
+            by_status: dict = snapshot_ev.get("nworkers_by_status") or {}
+            if len(by_status) <= 1:
+                return
+
+            # --- Status-bar chart (from snapshot evidence) ---
+            chart_str = render_chart(snapshot_ev, width=self._chart_width(), mode="auto")
+            self._write_panel(
+                Text(chart_str),
+                title=f"{_now()}  pilot chart",
+                border_style="green",
+            )
+
+            # --- Timeseries chart (second MCP call to OpenSearch tool) ---
+            # Extract status and time window from the last user question.
+            last_question = (
+                next(
+                    (m["content"] for m in reversed(self._history)
+                     if m.get("role") == "user"),
+                    "",
+                )
+            )
+            ts_status = _extract_status_from_question(last_question)
+            window = _extract_window_from_question(last_question)
+            ts_args: dict[str, str] = {"question": last_question, "status": ts_status}
+            site = snapshot_ev.get("site_filter")
+            if site:
+                ts_args["site"] = site
+            if window:
+                ts_args["from_dt"], ts_args["to_dt"] = window
+            else:
+                # Fall back to the window the snapshot tool actually used.
+                if snapshot_ev.get("from_dt"):
+                    ts_args["from_dt"] = snapshot_ev["from_dt"]
+                if snapshot_ev.get("to_dt"):
+                    ts_args["to_dt"] = snapshot_ev["to_dt"]
+
+            ts_res = await asyncio.wait_for(
+                self._to_thread(
+                    self.mcp.call_tool,
+                    "atlas.harvester_timeseries",
+                    ts_args,
+                ),
+                timeout=20,
+            )
+            ts_text = _extract_text(ts_res)
+            if not ts_text:
+                return
+            ts_parsed = json.loads(ts_text)
+            ts_ev = (ts_parsed.get("evidence") or ts_parsed)
+            if ts_ev.get("error") or len(ts_ev.get("buckets") or []) < 2:
+                return
+            ts_chart = render_chart(ts_ev, width=self._chart_width(), mode="timeseries")
+            self._write_panel(
+                Text(ts_chart),
+                title=f"{_now()}  pilot timeseries ({ts_status})",
+                border_style="green",
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass  # Never let a chart failure surface to the user
+
+    async def _handle_chart_command(self) -> None:
+        """Display an ASCII bar chart of Harvester pilot counts by status.
+
+        Retrieves the most recent ``panda_harvester_workers`` evidence from
+        the server-side store via ``bamboo_last_evidence(mode='evidence')``
+        and renders it using :func:`askpanda_atlas.chart_utils.render_chart`.
+
+        The chart is only meaningful after a pilot/Harvester question has been
+        asked.  If the last tool was not ``panda_harvester_workers`` (e.g. the
+        last query was a task or job lookup) a clear message is shown instead.
+
+        The chart is rendered as pre-formatted ``Text`` (not Markdown) to
+        prevent Rich from reflowing the bar characters.
+        """
+        if not self._mcp_ready:
+            self._write_system("Not connected yet.")
+            return
+        try:
+            from askpanda_atlas.chart_utils import render_chart  # deferred — optional dep
+        except ImportError:
+            self._write_system(
+                "chart_utils not available — is askpanda_atlas installed?"
+            )
+            return
+        try:
+            res = await asyncio.wait_for(
+                self._to_thread(
+                    self.mcp.call_tool,
+                    "bamboo_last_evidence",
+                    {"mode": "evidence"},
+                ),
+                timeout=30,
+            )
+            text = _extract_text(res)
+            if not text:
+                self._write_system(
+                    "No evidence stored yet — ask a pilot/Harvester question first."
+                )
+                return
+            parsed = json.loads(text)
+            if "error" in parsed:
+                self._write_system(parsed["error"])
+                return
+
+            # bamboo_last_evidence wraps its payload as {"evidence": {"evidence": {...}, "tool": "..."}}.
+            # Two unwrap steps are needed: first to get {"evidence": {...}, "tool": "..."}, then
+            # Structure from bamboo_last_evidence: {"tool": "...", "mode": "...", "evidence": {"evidence": {...}}}
+            # tool is at the top level; the actual evidence dict is two levels down.
+            tool = parsed.get("tool", "")
+            evidence = (parsed.get("evidence") or {}).get("evidence") or {}
+
+            # Only render a chart when the last tool was the harvester tool.
+            if tool and tool != "panda_harvester_workers":
+                self._write_system(
+                    f"Last query used '{tool}', not 'panda_harvester_workers'. "
+                    "Ask a pilot/Harvester question first, then type /chart."
+                )
+                return
+
+            if not evidence.get("nworkers_by_status") and not evidence.get("pivot"):
+                self._write_system(
+                    "No pilot counts in evidence — "
+                    "the Harvester API may have returned no data for that window."
+                )
+                return
+
+            chart_str = render_chart(evidence, width=self._chart_width(), mode="auto")
+            self._write_panel(
+                Text(chart_str),
+                title=f"{_now()}  pilot chart",
+                border_style="green",
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self._write_error(f"Could not render chart: {exc}")
 
     def _write_raw_json(self, res: Any) -> None:
         """Write the full raw BigPanDA JSON for the last tool result.

@@ -103,10 +103,15 @@ def _execute_query(
 ) -> dict[str, Any]:
     """Open the database, execute *sql*, and return rows plus metadata.
 
-    Opens a fresh read-only connection on the calling thread (required for
-    DuckDB thread safety — connections must not be shared across threads),
-    executes the query with a timeout, caps results at *max_rows*, and closes
-    the connection before returning.
+    Opens a fresh connection on the calling thread (required for DuckDB thread
+    safety — connections must not be shared across threads), executes the query
+    with a timeout, caps results at *max_rows*, and closes the connection before
+    returning.
+
+    On-disk paths are opened with ``read_only=True`` so this process can coexist
+    with the cric_agent writer without triggering DuckDB's single-writer lock.
+    In-memory paths (``":memory:"``) are opened read-write so tests can populate
+    fixture data before querying.
 
     Args:
         duckdb_path: Filesystem path to the DuckDB file, or ``":memory:"``.
@@ -122,8 +127,7 @@ def _execute_query(
         Exception: Any DuckDB error is re-raised so the caller can wrap it
             in a structured error response.
     """
-    read_only = duckdb_path != ":memory:"
-    conn = duckdb.connect(duckdb_path, read_only=read_only)
+    conn = duckdb.connect(database=duckdb_path, read_only=(duckdb_path != ":memory:"))
     try:
         try:
             conn.execute(f"SET statement_timeout='{timeout_secs}s'")
@@ -562,9 +566,12 @@ async def fetch_and_analyse(
 def _probe_table_names(duckdb_path: str) -> list[str]:
     """Return the list of table names in the DuckDB file, or an empty list on error.
 
-    Used as a diagnostic aid when a query fails due to a missing or
-    mis-named table.  The result is included in the error evidence so
-    operators can see what tables the cric_agent actually created.
+    Used as a diagnostic aid when a query fails due to a missing or mis-named
+    table.  The result is included in the error evidence so operators can see
+    what tables the cric_agent actually created.
+
+    On-disk paths are opened with ``read_only=True`` so this probe can run
+    concurrently with the cric_agent writer without contention.
 
     Args:
         duckdb_path: Filesystem path to the DuckDB file.
@@ -573,8 +580,7 @@ def _probe_table_names(duckdb_path: str) -> list[str]:
         List of table name strings, or an empty list if the probe fails.
     """
     try:
-        read_only = duckdb_path != ":memory:"
-        conn = duckdb.connect(duckdb_path, read_only=read_only)
+        conn = duckdb.connect(database=duckdb_path, read_only=(duckdb_path != ":memory:"))
         try:
             result = conn.execute(
                 "SELECT table_name FROM information_schema.tables "

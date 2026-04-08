@@ -165,6 +165,7 @@ export BAMBOO_TUI_INLINE_HEIGHT=60
 | `/job <id>` | Shorthand for "analyse failure of job \<id\>" |
 | `/json` | Show raw BigPanDA JSON for the last task/job query |
 | `/inspect` | Show compact evidence dict (job counts, sites, errors) |
+| `/chart` | Re-display the ASCII pilot chart for the last Harvester query |
 | `/tracing` | Show timing and trace spans for the last request |
 | `/costs` | Show estimated LLM token cost for the last request |
 | `/history` | Show turns currently held in context memory |
@@ -216,6 +217,34 @@ export BAMBOO_HISTORY_TURNS=5   # keep only the last 5 question+answer pairs
 
 Displays a table of the turns currently in context — role, character count,
 and a truncated preview.  Useful for debugging follow-up resolution.
+
+---
+
+---
+
+## Pilot Charts (Textual TUI)
+
+After every answer that comes from `panda_harvester_workers`, two ASCII chart panels are automatically appended:
+
+**Status bar** — shows total pilot counts per status (running, submitted, finished, failed, etc.) as a horizontal bar chart with proportional `█` bars, the time window, and the grand total.
+
+**Timeseries** — shows per-bucket pilot counts for the status mentioned in the question (e.g. `finished` for *"how many pilots finished in the last 20 minutes?"*) over the requested time window, with the bucket interval derived automatically from the window duration. Requires `ASKPANDA_OPENSEARCH` to be set and the OpenSearch cluster to be reachable (CERN network / VPN).
+
+The charts are only shown when `nworkers_by_status` contains more than one entry — a single-status result is not worth charting.
+
+Use `/chart` to re-display the most recent pilot chart after scrolling past it.
+
+### OpenSearch environment variables
+
+| Variable | Purpose |
+|---|---|
+| `ASKPANDA_OPENSEARCH` | Password for OpenSearch HTTP Basic auth. Required for timeseries charts. |
+| `ASKPANDA_OPENSEARCH_HOST` | OpenSearch cluster URL (default: `https://os-atlas.cern.ch/os`). |
+| `ASKPANDA_OPENSEARCH_USER` | HTTP auth username (default: `pilot-monitor-agent`). |
+| `ASKPANDA_OPENSEARCH_CA` | Path to CA certificate bundle (default: `/etc/pki/tls/certs/CERN-bundle.pem`). On macOS, copy from lxplus: `scp lxplus.cern.ch:/etc/pki/tls/certs/CERN-bundle.pem ~/cern-bundle.pem` |
+| `ASKPANDA_OPENSEARCH_VERIFY_CERTS` | Set to `false` to disable TLS cert verification (local dev without CA bundle). |
+
+The timeseries chart is silently skipped when OpenSearch is unreachable or the tool is not registered — it never disrupts the main answer.
 
 ---
 
